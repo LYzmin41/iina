@@ -97,7 +97,7 @@ enum OSDMessage {
   case abLoopUpdate(PlaybackInfo.LoopStatus, String)
   case stop
   case chapter(String)
-  case track(MPVTrack)
+  case track(MPVTrack, position: Int? = nil)
   case addToPlaylist(Int)
   case clearPlaylist
 
@@ -349,7 +349,7 @@ enum OSDMessage {
         .withLeftToRightText("({{currChapter}}/{{chapterCount}}) {{position}} / {{duration}}")
       )
 
-    case .track(let track):
+    case .track(let track, let position):
       let keySuffix: String
       switch track.type {
       case .video: keySuffix = "video"
@@ -363,7 +363,8 @@ enum OSDMessage {
       }
       let trackTypeStr = String(format: NSLocalizedString("track." + keySuffix,
         comment: "Kind of track (Audio, Video, Subtitle)"))
-      return (trackTypeStr + ": " + track.readableTitle, .normal)
+      let title = position.map { "#\($0) \(track.readableString())" } ?? track.readableTitle
+      return (trackTypeStr + ": " + title, .normal)
 
     case .subScale(let value):
       let text = String(format: NSLocalizedString("osd.subtitle_scale", comment: "Subtitle Scale: %@x"), value.groupedStringUpTo6Decimals)

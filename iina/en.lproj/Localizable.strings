@@ -52,6 +52,13 @@
 // QuickSettingViewController.swift
 "quicksetting.item_default" = "Default";
 "quicksetting.item_none" = "None";
+
+/* Track output selection */
+"sidebar.no_audio" = "No audio";
+"sidebar.no_video" = "No video";
+"sidebar.no_subtitles" = "No subtitles";
+"sidebar.add_audio_track" = "Add audio track…";
+"sidebar.add_video_track" = "Add video track…";
 "quicksetting.hwdec" = "Hardware Decoding";
 "quicksetting.deinterlace" = "Deinterlace";
 "quicksetting.hdr" = "HDR";
@@ -644,6 +651,7 @@
 "settings.screenshotSaveToFile.desc" = "/path/to/screenshot/folder";
 "settings.screenshotSaveToFile.label" = "Save to";
 "settings.screenshotShowPreview.label" = "Show previews after taking screenshots";
+"settings.screenshotPlaySound.label" = "Play screenshot sound";
 "settings.trackAllFilesInRecentOpenMenu.desc" = "Otherwise only files that opened manually will show up in this menu.";
 "settings.trackAllFilesInRecentOpenMenu.label" = "Track all played files in \"Open Recent\" menu";
 "settings.useLegacyFullScreen.label" = "Use legacy full screen";
@@ -709,7 +717,7 @@
 "settings.doubleClickAction.items.4" = "Enter/Exit picture-in-picture";
 "settings.doubleClickAction.items.5" = "A-B loop";
 "settings.doubleClickAction.items.6" = "Reset speed";
-"settings.doubleClickAction.label" = "Double click to";
+"settings.doubleClickAction.label" = "Double click on player to";
 "settings.forceTouchAction.items.0" = "None";
 "settings.forceTouchAction.items.1" = "Enter/Exit full screen";
 "settings.forceTouchAction.items.2" = "Pause/Resume";
@@ -727,7 +735,7 @@
 "settings.middleClickAction.items.4" = "Enter/Exit picture-in-picture";
 "settings.middleClickAction.items.5" = "A-B loop";
 "settings.middleClickAction.items.6" = "Reset speed";
-"settings.middleClickAction.label" = "Middle click to";
+"settings.middleClickAction.label" = "Middle click on player to";
 "settings.pinchAction.items.0" = "Adjust window size";
 "settings.pinchAction.items.1" = "Fullscreen";
 "settings.pinchAction.items.2" = "None";
@@ -741,11 +749,11 @@
 "settings.rightClickAction.items.4" = "Enter/Exit picture-in-picture";
 "settings.rightClickAction.items.5" = "A-B loop";
 "settings.rightClickAction.items.6" = "Reset speed";
-"settings.rightClickAction.label" = "Right click to";
+"settings.rightClickAction.label" = "Right click on player to";
 "settings.singleClickAction.items.0" = "None";
 "settings.singleClickAction.items.2" = "Pause/Resume";
 "settings.singleClickAction.items.3" = "Hide OSC";
-"settings.singleClickAction.label" = "Single click to";
+"settings.singleClickAction.label" = "Single click on player to";
 "settings.useExactSeek.desc" = "Exact seek is more precise but can cause lag and higher CPU usage.";
 "settings.useExactSeek.items.0" = "Keyframe seek";
 "settings.useExactSeek.items.1" = "Exact seek";
@@ -837,7 +845,6 @@
 "settings.arrowBtnAction.items.2" = "Fast Forward / Rewind";
 "settings.arrowBtnAction.label" = "Use left/right button for";
 "settings.controlBarAutoHideTimeout.label" = "Auto hide after";
-"settings.controlBarStickToCenter.label" = "Snap to center when dragging";
 "settings.disableAnimations.desc" = "When the macOS Reduce Motion accessibility setting is enabled IINA will reduce user interface animations that are known to cause problems for those with vestibular disorders. Should that be insufficient, this setting can be used to reduce motion further by eliminating user interface animations.";
 "settings.disableAnimations.label" = "Disable animations";
 "settings.disableOSDFileStartMsg.label" = "File start";
@@ -1037,3 +1044,135 @@
 "settings.$toThe" = "to the";
 "settings.$top" = "top";
 "settings.$ytdlWarning" = "The Online Media plugin has additional features such as switching quality and video downloading. IINA will use the plugin if it's installed and enabled. The settings below only work if the plugin is not available.";
+
+/* Floating on-screen controller default position */
+"settings.oscDefaultPosition.desc" = "Dragging changes the position only for the current player window.";
+"settings.controlBarDefaultPositionHorizontal.label" = "Horizontal Position";
+"settings.controlBarDefaultPositionVertical.label" = "Vertical Position";
+
+"settings.oscDefaultPosition.configure" = "Configure Position…";
+"settings.oscDefaultPosition.title" = "Default Floating Controller Position";
+"settings.oscDefaultPosition.preview" = "Controller position preview";
+"settings.oscDefaultPosition.cancel" = "Cancel";
+"settings.oscDefaultPosition.save" = "Save";
+
+"settings.windowGeometry.configure" = "Configure Size and Position…";
+"settings.windowGeometry.title" = "Initial Window Size and Position";
+"settings.windowGeometry.preview" = "Initial window size and position preview";
+
+"settings.oscPosition.percent" = "%";
+"settings.oscPosition.points" = "pt";
+"settings.oscPosition.left" = "Left";
+"settings.oscPosition.right" = "Right";
+"settings.oscPosition.top" = "Top";
+"settings.oscPosition.bottom" = "Bottom";
+"settings.oscPosition.horizontalUnit" = "Horizontal Units";
+"settings.oscPosition.verticalUnit" = "Vertical Units";
+"settings.oscPosition.horizontalEdge" = "Horizontal Edge";
+"settings.oscPosition.verticalEdge" = "Vertical Edge";
+
+"settings.oscPosition.from" = "from";
+
+"settings.oscDefaultPosition.reset" = "Reset";
+
+/* Seek step for OSC arrow buttons only. */
+"settings.oscArrowSeekSeconds.label" = "Seek by";
+
+/* Initial window configuration summary. */
+"settings.windowGeometry.configureShort" = "Configure…";
+
+"settings.previewContext.label" = "Preview";
+"settings.previewContext.standard" = "Standard";
+"settings.previewContext.custom" = "Custom…";
+"settings.previewContext.window" = "Current Window";
+"settings.previewContext.display" = "Current Display";
+
+"settings.mouseHideOSC.desc" = "Show again when the pointer moves.";
+"settings.keepOSCHidden.desc" = "Ignore pointer movement.";
+"settings.oscLeftClickAction.label" = "Left click on OSC to";
+"settings.oscLeftClickAction.items.0" = "None";
+"settings.oscLeftClickAction.items.1" = "Keep OSC hidden";
+"settings.oscLeftClickAction.items.2" = "Reset OSC position";
+"settings.oscLeftClickAction.items.3" = "Bring OSC to front";
+"settings.oscRightClickAction.label" = "Right click on OSC to";
+"settings.oscRightClickAction.items.0" = "None";
+"settings.oscRightClickAction.items.1" = "Keep OSC hidden";
+"settings.oscRightClickAction.items.2" = "Reset OSC position";
+"settings.oscRightClickAction.items.3" = "Bring OSC to front";
+"settings.oscDoubleClickAction.label" = "Double click on OSC to";
+"settings.oscDoubleClickAction.items.0" = "None";
+"settings.oscDoubleClickAction.items.1" = "Keep OSC hidden";
+"settings.oscDoubleClickAction.items.2" = "Reset OSC position";
+"settings.oscDoubleClickAction.items.3" = "Bring OSC to front";
+
+/* Interactive crop */
+"crop.save" = "Save";
+"crop.reset" = "Reset";
+"crop.width" = "Width in pixels";
+"crop.height" = "Height in pixels";
+"crop.aspect" = "Crop aspect ratio";
+"crop.add_preset" = "Add…";
+"crop.delete_preset" = "Delete";
+"crop.delete_selected_preset" = "Delete…";
+"crop.selection" = "Crop selection";
+"crop.zoom" = "Preview zoom";
+"crop.zoom_fit" = "Fit";
+
+/* Multitrack playback */
+"track.audio_mix_count" = "Audio: %d tracks";
+
+"track.video_layer_count" = "Video: %d layers";
+"alert.video_layers_failed" = "Cannot combine these video tracks because their dimensions are unavailable.";
+"alert.track_graph_conflict" = "Multiple tracks cannot be enabled while a custom lavfi-complex graph is active.";
+"alert.track_graph_failed" = "Unable to combine the selected tracks.";
+
+/* Per-track settings */
+"track_settings.target" = "Settings target";
+"track_settings.configure" = "Configure:";
+"track_settings.master" = "Master";
+"track_settings.output" = "Output";
+"track_settings.reset_all" = "Reset all";
+"track_settings.color" = "Color";
+
+/* Video LUT */
+"lut.none" = "None";
+"lut.import" = "Import LUT…";
+"lut.invalid_file" = "Choose a valid 3D LUT in .cube format.";
+"alert.lut_import_failed" = "Could not import LUT: %@";
+"alert.lut_apply_failed" = "Could not apply this LUT. The previous settings have been retained.";
+
+/* External track removal */
+"track.remove_external" = "Remove external track";
+"alert.track.remove_failed" = "Unable to remove this external track.";
+
+"track_settings.track" = "Track %ld";
+
+// LUT library removal
+"lut.remove" = "Delete LUT…";
+"alert.lut_remove.title" = "Delete LUT “%@”?";
+"alert.lut_remove.message" = "The library copy will be moved to Trash and disabled in all windows. The original file will be kept.";
+"alert.lut_remove_failed" = "The LUT could not be moved to Trash. Please try again.";
+"alert.lut_remove_crop" = "Finish editing Custom Crop in windows using this LUT, then try deleting it again.";
+
+// Shared track processing context
+"track_settings.settings" = "Settings";
+"track_settings.geometry" = "Geometry";
+"track_settings.playback" = "Playback";
+"track_settings.group_actions" = "%@ actions";
+
+/* Processing group reset scopes */
+"track_settings.reset" = "Reset";
+"track_settings.reset_track" = "Reset Track";
+"track_settings.reset_numbered_track" = "Reset Track %ld";
+"track_settings.reset_output" = "Reset %@";
+"track_settings.reset_tracks" = "Reset All Tracks";
+"track_settings.reset_group" = "Reset %@ settings.";
+"track_settings.selected_track" = "the selected track";
+"track_settings.reset_selected_hint" = "Reset %@ for %@ only.";
+"track_settings.reset_tracks_hint" = "Reset %@ for all tracks and %@.";
+
+/* LUT library settings. */
+
+"sidebar.style" = "Style";
+
+"sidebar.adjustments" = "Adjustments";

@@ -158,7 +158,11 @@ class MPVController: NSObject {
     MPVProperty.videoParamsGamma: MPV_FORMAT_STRING,
     MPVProperty.idleActive: MPV_FORMAT_FLAG,
     MPVProperty.currentAo: MPV_FORMAT_STRING
-  ]
+  ].merging(Dictionary(uniqueKeysWithValues:
+    SubtitleStyle.options.flatMap { option in
+      [option, SubtitleStyle.option(option, forPrimary: false)]
+    }.filter { $0 != MPVOption.Subtitles.subScale }.map { ($0, MPV_FORMAT_NONE) }
+  )) { current, _ in current }
 
   /// Map from mpv codec name to core media video codec types.
   ///
@@ -519,6 +523,57 @@ class MPVController: NSObject {
                   verboseIfDefault: true)
     setUserOption(PK.subMarginY, type: .int, forName: MPVOption.Subtitles.subMarginY,
                   verboseIfDefault: true)
+
+    // Opt-in renderer extension; stock clients retain inherited secondary styles.
+    if setOptionFlag("secondary-sub-style-override", true) >= 0 {
+      setUserOption(PK.subTextFont, type: .string, forName: "secondary-" + MPVOption.Subtitles.subFont,
+                    verboseIfDefault: true)
+      setUserOption(PK.subTextSize, type: .float, forName: "secondary-" + MPVOption.Subtitles.subFontSize,
+                    verboseIfDefault: true)
+
+      setUserOption(PK.subTextColorString, type: .color, forName: "secondary-" + MPVOption.Subtitles.subColor,
+                    verboseIfDefault: true)
+
+      setUserOption(PK.subBold, type: .bool, forName: "secondary-" + MPVOption.Subtitles.subBold,
+                    verboseIfDefault: true)
+      setUserOption(PK.subItalic, type: .bool, forName: "secondary-" + MPVOption.Subtitles.subItalic,
+                    verboseIfDefault: true)
+
+      setUserOption(PK.subBlur, type: .float, forName: "secondary-" + MPVOption.Subtitles.subBlur,
+                    verboseIfDefault: true)
+      setUserOption(PK.subSpacing, type: .float, forName: "secondary-" + MPVOption.Subtitles.subSpacing,
+                    verboseIfDefault: true)
+
+      setUserOption(PK.subBorderSize, type: .float, forName: "secondary-" + MPVOption.Subtitles.subOutlineSize,
+                    verboseIfDefault: true)
+      setUserOption(PK.subBorderColorString, type: .color, forName: "secondary-" + MPVOption.Subtitles.subOutlineColor,
+                    verboseIfDefault: true)
+
+      setUserOption(PK.subShadowSize, type: .float, forName: "secondary-" + MPVOption.Subtitles.subShadowOffset,
+                    verboseIfDefault: true)
+      setUserOption(PK.subShadowColorString, type: .color, forName: "secondary-" + MPVOption.Subtitles.subBackColor,
+                    verboseIfDefault: true)
+
+      setUserOption(PK.subBorderStyle, type: .other, forName: "secondary-" + MPVOption.Subtitles.subBorderStyle,
+                    verboseIfDefault: true) { key in
+        String(describing: Preference.enum(for: key) as Preference.SubBorderStyle)
+      }
+
+      setUserOption(PK.subAlignX, type: .other, forName: "secondary-" + MPVOption.Subtitles.subAlignX,
+                    verboseIfDefault: true) { key in
+        return String(describing: Preference.enum(for: key) as Preference.SubAlignX)
+      }
+
+      setUserOption(PK.subAlignY, type: .other, forName: "secondary-" + MPVOption.Subtitles.subAlignY,
+                    verboseIfDefault: true) { key in
+        return String(describing: Preference.enum(for: key) as Preference.SubAlignY)
+      }
+
+      setUserOption(PK.subMarginX, type: .int, forName: "secondary-" + MPVOption.Subtitles.subMarginX,
+                    verboseIfDefault: true)
+      setUserOption(PK.subMarginY, type: .int, forName: "secondary-" + MPVOption.Subtitles.subMarginY,
+                    verboseIfDefault: true)
+    }
 
     setUserOption(PK.subPos, type: .float, forName: MPVOption.Subtitles.subPos, verboseIfDefault: true)
 
@@ -1406,6 +1461,11 @@ class MPVController: NSObject {
         break
       }
       DispatchQueue.main.async { self.player.subDelayChanged(data) }
+
+    case let option where option != MPVOption.Subtitles.subScale &&
+        (SubtitleStyle.options.contains(option) ||
+         SubtitleStyle.options.contains(where: { "secondary-" + $0 == option })):
+      DispatchQueue.main.async { self.player.postNotification(.iinaSubtitleStyleChanged) }
 
     case MPVOption.Subtitles.subScale:
       guard let data = UnsafePointer<Double>(OpaquePointer(property.data))?.pointee else {

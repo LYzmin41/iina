@@ -7,6 +7,22 @@
 //
 
 import Cocoa
+import AudioToolbox
+
+private enum ScreenshotSound {
+  private static let soundID: SystemSoundID? = {
+    let url = URL(fileURLWithPath: "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif")
+    var soundID: SystemSoundID = 0
+    guard AudioServicesCreateSystemSoundID(url as CFURL, &soundID) == kAudioServicesNoError else { return nil }
+    return soundID
+  }()
+
+  static func play() {
+    guard Preference.bool(for: .screenshotPlaySound), let soundID else { return }
+    // System Sound Services respects macOS sound-effects settings, independently of mpv volume.
+    AudioServicesPlaySystemSoundWithCompletion(soundID, nil)
+  }
+}
 
 class PlayerCore: NSObject {
 
@@ -663,6 +679,26 @@ class PlayerCore: NSObject {
     }
 
     mpv.mpvInit()
+    mpv.addHook(.onUnLoad, hook: MPVHookValue(withBlock: { [weak self] next in
+      DispatchQueue.main.async {
+        self?.saveVideoGeometryForCurrentMedia()
+        next()
+      }
+    }))
+    mpv.addHook(.onLoad, hook: MPVHookValue(withBlock: { [weak self] next in
+      DispatchQueue.main.async {
+        guard let self else { next(); return }
+        self.clearTrackGraphForNewFile()
+        self.prepareVideoGeometryForNewFile()
+        self.prepareMultivideoDemuxer(then: next)
+      }
+    }))
+    mpv.addHook(.onPreLoaded, hook: MPVHookValue(withBlock: { [weak self] next in
+      DispatchQueue.main.async {
+        self?.restoreVideoGeometryForCurrentMedia()
+        next()
+      }
+    }))
     events.emit(.mpvInitialized)
 
     let audioDevice = Preference.string(for: .audioDevice)!
@@ -1074,7 +1110,7 @@ class PlayerCore: NSObject {
       return false
     }
 
-    guard let vid = info.vid, vid > 0 else {
+    guard !info.activeTrackIDs(.video).isEmpty else {
       log("Ignoring screenshot request: no video stream is being played", level: .warning)
       return false
     }
@@ -1153,6 +1189,7 @@ class PlayerCore: NSObject {
 
     guard let imageFolder = mpv.getString(MPVOption.Screenshot.screenshotDir) else { return }
     guard let lastScreenshotURL = Utility.getLatestScreenshot(from: imageFolder) else { return }
+    if saveToFile { ScreenshotSound.play() }
     guard let image = createImage(lastScreenshotURL) else {
       self.sendOSD(.screenshot)
       if !saveToFile {
@@ -1162,7 +1199,8 @@ class PlayerCore: NSObject {
     }
     if saveToClipboard {
       NSPasteboard.general.clearContents()
-      NSPasteboard.general.writeObjects([image])
+      let copiedToClipboard = NSPasteboard.general.writeObjects([image])
+      if copiedToClipboard && !saveToFile { ScreenshotSound.play() }
     }
     guard Preference.bool(for: .screenshotShowPreview) else {
       self.sendOSD(.screenshot)
@@ -1304,20 +1342,470 @@ class PlayerCore: NSObject {
     }
   }
 
+  /// Native MKV seeks follow one video's cues and can skip keyframes in separate clusters.
+  /// Select FFmpeg before opening multivideo MKVs; retain explicit demuxer overrides.
+  private func prepareMultivideoDemuxer(then next: @escaping () -> Void) {
+    guard (mpv.getString(MPVOption.Demuxer.demuxer) ?? "").isEmpty,
+          let path = mpv.getString(MPVProperty.path) else { next(); return }
+    let url = path.hasPrefix("file://") ? URL(string: path) : URL(fileURLWithPath: path)
+    guard let url, url.isFileURL,
+          ["mkv", "mk3d", "webm"].contains(url.pathExtension.lowercased()),
+          (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { next(); return }
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let useLavf = FFmpegController.hasMultipleVideoTracks(inMatroskaFile: url.path)
+      DispatchQueue.main.async {
+        if useLavf {
+          self?.mpv.setString("file-local-options/demuxer", "lavf")
+        }
+        next()
+      }
+    }
+  }
+
+  var scopedTrackSettings = TrackProcessingState()
+  var scopedCropPreview: ScopedTrackCropPreview?
+  private var defaultVideoGeometry: MediaVideoGeometryState?
+  private var videoGeometrySession: [URL: MediaVideoGeometryState] = [:]
+  // info.currentURL can already name the replacement while the old file unloads.
+  private var videoGeometryMediaURL: URL?
+  private var videoGeometryIsLoaded = false
+  private var ownedTrackGraph: String?
+  private var persistentAudioInputs: Set<Int>?
+
+  private var videoGeometryFilterLabels: Set<String> {
+    [Constants.FilterName.crop, Constants.FilterName.flip,
+     Constants.FilterName.mirror, Constants.FilterName.delogo]
+  }
+
+  /// Detach dormant media references along with active LUT users. The caller
+  /// restores this snapshot if any engine or filesystem step fails.
+  func detachSavedVideoLUT(atPath path: String) -> () -> Void {
+    let sessions = videoGeometrySession
+    let defaults = defaultVideoGeometry
+    for (url, var value) in videoGeometrySession {
+      value.removeLUT(atPath: path)
+      videoGeometrySession[url] = value
+    }
+    defaultVideoGeometry?.removeLUT(atPath: path)
+    return { [weak self] in
+      self?.videoGeometrySession = sessions
+      self?.defaultVideoGeometry = defaults
+    }
+  }
+
+  private func readVideoGeometry() -> MediaVideoGeometryState {
+    var result = MediaVideoGeometryState()
+    for name in MediaVideoGeometryState.optionNames {
+      result.options[name] = mpv.getString(name)
+    }
+    let filters = mpv.getFilters(MPVProperty.vf)
+    for (index, filter) in filters.enumerated() {
+      if filter.label.map({ videoGeometryFilterLabels.contains($0) }) == true {
+        result.filters.append(filter.stringFormat)
+        result.filterIndices.append(index)
+      }
+    }
+    result.aspectDescription = MediaVideoGeometryState.aspectDescription(
+      for: mpv.getDouble(MPVOption.Video.videoAspectOverride), preferred: info.unsureAspect)
+    if let crop = filters.first(where: { $0.label == Constants.FilterName.crop }) {
+      result.cropDescription = info.cropFilter?.isEqual(crop) == true ? info.unsureCrop : ""
+    }
+    result.video = scopedTrackSettings.video
+    result.videoTarget = scopedTrackSettings.target(.videoGeometry)
+    result.videoOrder = info.videoTrackOrder
+    let active = info.activeTrackIDs(.video)
+    result.activeVideo = info.videoTrackOrder.filter { active.contains($0) }
+    result.activeVideo.append(contentsOf: active.sorted().filter { !result.activeVideo.contains($0) })
+    return result
+  }
+
+  private func saveVideoGeometryForCurrentMedia() {
+    guard videoGeometryIsLoaded, let url = videoGeometryMediaURL else { return }
+    // Save committed values, not crop-preview/panscan overrides; hooks run on main before releasing mpv.
+    mainWindow?.interactiveMode.exit()
+    let originalPanscan = mainWindow?.videoAspectTransitionOriginalPanscan
+    mainWindow?.finishVideoAspectTransition()
+    var saved = readVideoGeometry()
+    if let originalPanscan { saved.options["panscan"] = String(originalPanscan) }
+    videoGeometrySession[url] = saved
+    videoGeometryIsLoaded = false
+  }
+
+  private func prepareVideoGeometryForNewFile() {
+    videoGeometryMediaURL = info.currentURL.map { $0.isFileURL ? $0.standardizedFileURL : $0 }
+    videoGeometryIsLoaded = false
+    // CLI/plugin options can follow mpv_initialize; capture them at the first load barrier, before file edits.
+    if defaultVideoGeometry == nil { defaultVideoGeometry = readVideoGeometry() }
+    // File-local defaults prevent geometry leaking between media; watch-later/config loading follows.
+    if let defaultVideoGeometry { applyVideoGeometry(defaultVideoGeometry) }
+  }
+
+  private func restoreVideoGeometryForCurrentMedia() {
+    if let url = videoGeometryMediaURL, let saved = videoGeometrySession[url] {
+      // Runs after file configs/watch-later and before decoder initialization.
+      applyVideoGeometry(saved)
+    } else {
+      syncVideoGeometryInfo()
+    }
+  }
+
+  private func applyVideoGeometry(_ value: MediaVideoGeometryState) {
+    for name in MediaVideoGeometryState.optionNames {
+      if let option = value.options[name], mpv.setString("file-local-options/\(name)", option) < 0 {
+        log("Failed to restore video geometry option \(name)", level: .warning)
+      }
+    }
+    // Leave user/plugin/color filters outside IINA's geometry snapshot.
+    var filters = mpv.getFilters(MPVProperty.vf).filter {
+      !($0.label.map { videoGeometryFilterLabels.contains($0) } ?? false)
+    }.map(\.stringFormat)
+    for (index, filter) in value.filters.enumerated() {
+      let position = index < value.filterIndices.count ? value.filterIndices[index] : filters.count
+      filters.insert(filter, at: min(max(0, position), filters.count))
+    }
+    if mpv.setString("file-local-options/vf", filters.joined(separator: ",")) < 0 {
+      log("Failed to restore video geometry filters", level: .warning)
+    }
+    syncVideoGeometryInfo(aspect: value.aspectDescription, crop: value.cropDescription)
+  }
+
+  private func syncVideoGeometryInfo(aspect: String = "Default", crop: String? = nil) {
+    info.unsureAspect = MediaVideoGeometryState.aspectDescription(
+      for: mpv.getDouble(MPVOption.Video.videoAspectOverride), preferred: aspect)
+    info.rotation = mpv.getInt(MPVOption.Video.videoRotate)
+    reloadSavedIINAfilters()
+    if info.cropFilter != nil, let crop { info.unsureCrop = crop }
+  }
+
+  private func restoreVideoTrackGeometryForCurrentMedia() {
+    guard let url = videoGeometryMediaURL, let saved = videoGeometrySession[url] else { return }
+    let available = Set(info.videoTracks.map(\.id))
+    scopedTrackSettings.video = saved.video.filter { available.contains($0.key) }
+    scopedTrackSettings.setTarget(available.contains(saved.videoTarget) ? saved.videoTarget : 0, for: .videoGeometry)
+    info.videoTrackOrder = saved.videoOrder.filter { available.contains($0) }
+    info.videoTrackOrder.append(contentsOf: info.videoTracks.map(\.id).filter { !info.videoTrackOrder.contains($0) })
+    let video = saved.activeVideo.filter { available.contains($0) }
+    if saved.activeVideo.isEmpty || !video.isEmpty {
+      if !refreshTrackProcessing(.video, videoOverride: video) {
+        scopedTrackSettings.video = [:]
+        scopedTrackSettings.setTarget(0, for: .videoGeometry)
+      }
+    }
+    postNotification(.iinaTrackSettingsChanged)
+  }
+
+  private func audioMixerInputsAreCompatible(_ inputs: Set<Int>) -> Bool {
+    let tracks = info.audioTracks.filter { inputs.contains($0.id) }
+    guard tracks.count == inputs.count, let first = tracks.first,
+          let channels = first.demuxChannelCount, channels > 0,
+          tracks.allSatisfy({ $0.demuxChannelCount == channels }) else { return false }
+    return channels <= 2 || (first.demuxChannels != nil &&
+      first.demuxChannels?.hasPrefix("unknown") == false &&
+      tracks.allSatisfy({ $0.demuxChannels == first.demuxChannels }))
+  }
+
+  private func prepareAudioMixer() {
+    guard info.currentURL?.isFileURL == true, info.audioTracks.count > 1,
+          audioMixerInputsAreCompatible(Set(info.audioTracks.map(\.id))),
+          ownedTrackGraph == nil,
+          (mpv.getString(MPVOption.Miscellaneous.lavfiComplex) ?? "").isEmpty,
+          (mpv.getString("audio-spdif") ?? "").isEmpty,
+          let commands = mpv.getNode("command-list") as? [[String: Any]],
+          commands.contains(where: {
+            $0["name"] as? String == "lavfi-complex-command" &&
+              ($0["args"] as? [[String: Any]])?.contains(where: { $0["name"] as? String == "refresh-audio" }) == true
+          }) else { return }
+    let selected = info.activeTrackIDs(.audio)
+    persistentAudioInputs = Set(info.audioTracks.map(\.id))
+    if !applyTrackSelection(audio: selected, video: info.layeredVideoTrackIDs,
+                           changedType: .audio, soloID: selected.first ?? 0) {
+      persistentAudioInputs = nil
+    }
+  }
+
+  /// Only clear graphs installed by this player; custom lavfi graphs retain ownership.
+  private func clearTrackGraphForNewFile() {
+    if scopedCropPreview != nil {
+      mainWindow?.interactiveMode.exit(discardingCrop: true)
+      finishScopedCustomCrop(restoringSelection: false)
+    }
+    mainWindow?.finishVideoAspectTransition(restore: false)
+    if let graph = ownedTrackGraph, mpv.getString(MPVOption.Miscellaneous.lavfiComplex) == graph {
+      mpv.setString(MPVOption.Miscellaneous.lavfiComplex, "")
+    }
+    ownedTrackGraph = nil
+    persistentAudioInputs = nil
+    scopedTrackSettings = TrackProcessingState()
+    postNotification(.iinaTrackSettingsChanged)
+    info.mixedAudioTrackIDs = []
+    info.layeredVideoTrackIDs = []
+    info.videoTrackOrder = []
+    info.audioTrackOrder = []
+  }
+
+  @discardableResult
+  func setAudioTracks(_ ids: Set<Int>) -> Bool {
+    reconcileTrackGraph()
+    guard ids.isSubset(of: Set(info.audioTracks.map(\.id))) else { return false }
+    return applyTrackSelection(audio: ids, video: info.layeredVideoTrackIDs,
+                               changedType: .audio, soloID: ids.first ?? 0)
+  }
+
+  @discardableResult
+  func setVideoTracks(_ ids: Set<Int>, order: [Int]? = nil) -> Bool {
+    reconcileTrackGraph()
+    let available = info.videoTracks.map(\.id)
+    guard ids.isSubset(of: Set(available)) else { return false }
+    var ordered = (order ?? info.videoTrackOrder).filter { available.contains($0) }
+    ordered.append(contentsOf: available.filter { !ordered.contains($0) })
+    let layers = ordered.filter { ids.contains($0) }
+    let changesVideo = ids != info.activeTrackIDs(.video) ||
+      (layers.count > 1 && layers != info.layeredVideoTrackIDs)
+    if ids.isEmpty { mainWindow?.finishVideoAspectTransition() }
+    if !changesVideo {
+      info.videoTrackOrder = ordered
+      return true
+    }
+    let startedTransition = !ids.isEmpty && changesVideo && mainWindow.beginVideoAspectTransition()
+    guard applyTrackSelection(audio: info.activeTrackIDs(.audio), video: layers,
+                              changedType: .video, soloID: ids.first ?? 0) else {
+      if startedTransition { mainWindow.finishVideoAspectTransition() }
+      return false
+    }
+    info.videoTrackOrder = ordered
+    return true
+  }
+
+  /// Audio membership updates buffered audio without seeking video; topology rebuilds mpv's shared A/V graph.
+  private func applyTrackSelection(audio: Set<Int>, video: [Int],
+                                   changedType: MPVTrack.TrackType, soloID: Int, forceRebuild: Bool = false, audioRollback: [Int: AudioTrackProcessing]? = nil,
+                                   excludingAudioInput: Int? = nil) -> Bool {
+    var video = scopedCropPreview.map { [$0.id] } ?? video
+    if changedType == .audio, video.isEmpty, !scopedTrackSettings.video.isEmpty {
+      video = info.videoTrackOrder.filter { info.activeTrackIDs(.video).contains($0) }
+      if video.isEmpty { video = info.activeTrackIDs(.video).sorted() }
+    }
+    let current = mpv.getString(MPVOption.Miscellaneous.lavfiComplex) ?? ""
+    var inputs = persistentAudioInputs.map { $0.intersection(info.audioTracks.map(\.id)).union(audio) }
+    if let excludingAudioInput { inputs?.remove(excludingAudioInput) }
+    if let candidate = inputs, !audioMixerInputsAreCompatible(candidate) { inputs = nil }
+    if !forceRebuild, changedType == .audio, let inputs, inputs == persistentAudioInputs,
+       current == ownedTrackGraph {
+      if audio == info.activeTrackIDs(.audio) { return true }
+      var result: Int32 = -1
+      mpv.command(MPVCommand("lavfi-complex-command"),
+                  args: [AudioTrackMixGraph.target, "weights", AudioTrackMixGraph.weights(audio, inputs: inputs), "yes"],
+                  checkError: false) { result = $0 }
+      guard result >= 0 else {
+        Utility.showAlert("track_graph_failed", sheetWindow: mainWindow.window)
+        return false
+      }
+      info.mixedAudioTrackIDs = audio
+      getSelectedTracks()
+      aidChanged()
+      return true
+    }
+    let audioGraph = ProcessedAudioGraph.make(audio, inputs: inputs, settings: scopedTrackSettings.audio,
+                                             sampleRate: max(48000, info.audioTracks.compactMap(\.demuxSamplerate).max() ?? 48000))
+    var videoGraph: String?
+    if let preview = scopedCropPreview {
+      videoGraph = "[vid\(preview.id)]null[vo]"
+    } else if video.count > 1 || video.contains(where: { scopedTrackSettings.video[$0]?.isNeutral == false }) {
+      guard let base = info.videoTracks.first(where: { $0.id == video.last }),
+            let width = base.demuxW, let height = base.demuxH,
+            let graph = ProcessedVideoGraph.make(video, width: width, height: height, settings: scopedTrackSettings.video, pixelAspect: base.demuxPixelAspect ?? 1) else {
+        Utility.showAlert("video_layers_failed", sheetWindow: mainWindow.window)
+        return false
+      }
+      videoGraph = graph
+    }
+    let nativeOption = changedType == .audio ? MPVOption.TrackSelection.aid : MPVOption.TrackSelection.vid
+    if audioGraph == nil, videoGraph == nil, ownedTrackGraph == nil {
+      mpv.setInt(nativeOption, soloID)
+      getSelectedTracks()
+      if changedType == .audio { aidChanged() } else { vidChanged() }
+      return true
+    }
+    guard current.isEmpty || current == ownedTrackGraph else {
+      Utility.showAlert("track_graph_conflict", sheetWindow: mainWindow.window)
+      return false
+    }
+    let replacement = [audioGraph, videoGraph].compactMap { $0 }.joined(separator: ";")
+    let previousAudio = info.activeTrackIDs(.audio)
+    let previousVideo = info.activeTrackIDs(.video)
+    let refreshVideo = mainWindow.loaded && (videoGraph != nil || !info.layeredVideoTrackIDs.isEmpty)
+    if refreshVideo { mainWindow.videoView.displayActive() }
+    defer {
+      if refreshVideo, mpv.getFlag(MPVOption.PlaybackControl.pause) { mainWindow.videoView.displayIdle() }
+    }
+    if replacement != current {
+      let result = mpv.setString(MPVOption.Miscellaneous.lavfiComplex, replacement)
+      guard result >= 0 else {
+        // Failed graph writes can destroy both outputs; runtime gains must be restored from weights, not option text.
+        var restoration = current
+        if ownedTrackGraph != nil, let end = current.range(of: "[ao]"),
+           let graph = ProcessedAudioGraph.make(previousAudio, inputs: persistentAudioInputs, settings: audioRollback ?? scopedTrackSettings.audio, sampleRate: max(48000, info.audioTracks.compactMap(\.demuxSamplerate).max() ?? 48000)) {
+          restoration = graph + current[end.upperBound...]
+        }
+        let restored = mpv.setString(MPVOption.Miscellaneous.lavfiComplex, restoration)
+        let audioID = previousAudio.sorted().first ?? 0
+        let videoID = info.layeredVideoTrackIDs.first ?? previousVideo.first ?? 0
+        if restored < 0 {
+          mainWindow?.finishVideoAspectTransition()
+          ownedTrackGraph = nil
+          persistentAudioInputs = nil
+          info.mixedAudioTrackIDs = []
+          info.layeredVideoTrackIDs = []
+        }
+        if restored >= 0 { ownedTrackGraph = restoration.isEmpty ? nil : restoration }
+        if restored < 0 || !current.contains("[ao]"),
+           mpv.getInt(MPVOption.TrackSelection.aid) != audioID {
+          mpv.setInt(MPVOption.TrackSelection.aid, 0)
+          mpv.setInt(MPVOption.TrackSelection.aid, audioID)
+        }
+        if restored < 0 || previousVideo.count <= 1,
+           mpv.getInt(MPVOption.TrackSelection.vid) != videoID {
+          mpv.setInt(MPVOption.TrackSelection.vid, 0)
+          mpv.setInt(MPVOption.TrackSelection.vid, videoID)
+        }
+        if restored < 0 {
+          getSelectedTracks()
+          aidChanged()
+          vidChanged()
+        }
+        Utility.showAlert("track_graph_failed", sheetWindow: mainWindow.window)
+        return false
+      }
+    }
+    ownedTrackGraph = replacement.isEmpty ? nil : replacement
+    persistentAudioInputs = audioGraph == nil ? nil : inputs
+    info.mixedAudioTrackIDs = audioGraph == nil ? [] : audio
+    info.layeredVideoTrackIDs = videoGraph == nil ? [] : video
+    // Replacing a graph can leave cached aid/vid equal to the requested native
+    // choice with no track actually selected. Reset before selecting that ID.
+    if audioGraph == nil {
+      let id = changedType == .audio ? soloID : previousAudio.first ?? 0
+      if mpv.getInt(MPVOption.TrackSelection.aid) != id {
+        if id > 0 { mpv.setInt(MPVOption.TrackSelection.aid, 0) }
+        mpv.setInt(MPVOption.TrackSelection.aid, id)
+      }
+    }
+    if videoGraph == nil {
+      let id = changedType == .video ? soloID : previousVideo.first ?? 0
+      if mpv.getInt(MPVOption.TrackSelection.vid) != id {
+        if id > 0 { mpv.setInt(MPVOption.TrackSelection.vid, 0) }
+        mpv.setInt(MPVOption.TrackSelection.vid, id)
+      }
+    }
+    getSelectedTracks()
+    if changedType == .audio { aidChanged() } else { vidChanged() }
+    return true
+  }
+
+  @discardableResult
+  func refreshTrackProcessing(_ type: MPVTrack.TrackType, videoOverride: [Int]? = nil, audioRollback: [Int: AudioTrackProcessing]? = nil) -> Bool {
+    let audio = info.activeTrackIDs(.audio)
+    let activeVideo = info.activeTrackIDs(.video)
+    var video = info.videoTrackOrder.filter { activeVideo.contains($0) }
+    video.append(contentsOf: activeVideo.sorted().filter { !video.contains($0) })
+    return applyTrackSelection(audio: audio, video: videoOverride ?? video, changedType: type,
+                               soloID: type == .audio ? (audio.sorted().first ?? 0) : ((videoOverride ?? video).first ?? 0),
+                               forceRebuild: true, audioRollback: audioRollback)
+  }
+
+  @discardableResult
+  func refreshTrackAudioEQ(id: Int, previous: [Double], gains: [Double], audioRollback: [Int: AudioTrackProcessing]) -> Bool {
+    let current = mpv.getString(MPVOption.Miscellaneous.lavfiComplex) ?? ""
+    guard current == ownedTrackGraph,
+          current.contains(ProcessedAudioGraph.equalizerTarget(trackID: id, band: 0)) else {
+      return refreshTrackProcessing(.audio, audioRollback: audioRollback)
+    }
+    return sendTrackAudioEQCommands([(id, previous, gains)])
+  }
+
+  @discardableResult
+  func neutralizeTrackAudioEQ(_ settings: [Int: AudioTrackProcessing], restoring: Bool = false) -> Bool {
+    let current = mpv.getString(MPVOption.Miscellaneous.lavfiComplex) ?? ""
+    guard ownedTrackGraph != nil else { return true }
+    guard current == ownedTrackGraph else { return settings.isEmpty }
+    let changes = settings.sorted(by: { $0.key < $1.key }).compactMap { id, value -> (Int, [Double], [Double])? in
+      guard current.contains(ProcessedAudioGraph.equalizerTarget(trackID: id, band: 0)) else { return nil }
+      let zero = Array(repeating: 0.0, count: 10)
+      return restoring ? (id, zero, value.gains) : (id, value.gains, zero)
+    }
+    return sendTrackAudioEQCommands(changes)
+  }
+
+  private func sendTrackAudioEQCommands(_ changes: [(Int, [Double], [Double])]) -> Bool {
+    let commands = changes.flatMap { id, previous, gains in
+      gains.indices.filter { gains[$0] != previous[$0] }.map { (id, $0, previous[$0], gains[$0]) }
+    }
+    var applied: [(Int, Int, Double, Double)] = []
+    for (index, command) in commands.enumerated() {
+      let (id, band, old, gain) = command
+      var result: Int32 = -1
+      mpv.command(MPVCommand("lavfi-complex-command"),
+        args: [ProcessedAudioGraph.equalizerTarget(trackID: id, band: band), "gain",
+               String(gain), index == commands.count - 1 ? "yes" : "no"], checkError: false) { result = $0 }
+      if result < 0 {
+        for (oldID, oldBand, oldGain, _) in applied {
+          mpv.command(MPVCommand("lavfi-complex-command"),
+            args: [ProcessedAudioGraph.equalizerTarget(trackID: oldID, band: oldBand), "gain", String(oldGain), "yes"], checkError: false)
+        }
+        Utility.showAlert("track_graph_failed", sheetWindow: mainWindow.window)
+        return false
+      }
+      applied.append((id, band, old, gain))
+    }
+    return true
+  }
+
+  /// Drop stale marks if a plugin or user has replaced our complete graph.
+  private func reconcileTrackGraph() {
+    if let graph = ownedTrackGraph, mpv.getString(MPVOption.Miscellaneous.lavfiComplex) != graph {
+      ownedTrackGraph = nil
+      persistentAudioInputs = nil
+      info.mixedAudioTrackIDs = []
+      info.layeredVideoTrackIDs = []
+      getSelectedTracks()
+      postNotification(.iinaAIDChanged)
+      postNotification(.iinaVIDChanged)
+    }
+  }
+
+  func cycleVideoTrack() {
+    let tracks = info.orderedTrackList(.video)
+    guard !tracks.isEmpty else { return }
+    let selected = info.activeTrackIDs(.video)
+    let current = selected.count == 1 ? selected.first : nil
+    let next = tracks.firstIndex { $0.id == current }.map { ($0 + 1) % tracks.count } ?? 0
+    setVideoTracks([tracks[next].id])
+  }
+
+  func cycleAudioTrack() {
+    let tracks = info.orderedTrackList(.audio)
+    guard !tracks.isEmpty else { return }
+    let selected = info.activeTrackIDs(.audio)
+    let current = selected.count == 1 ? selected.first : nil
+    let next = tracks.firstIndex { $0.id == current }.map { ($0 + 1) % tracks.count } ?? 0
+    setAudioTracks([tracks[next].id])
+  }
+
   func setTrack(_ index: Int, forType: MPVTrack.TrackType) {
-    let name: String
     switch forType {
     case .audio:
-      name = MPVOption.TrackSelection.aid
+      setAudioTracks(index > 0 ? [index] : [])
     case .video:
-      name = MPVOption.TrackSelection.vid
-    case .sub:
-      name = MPVOption.TrackSelection.sid
-    case .secondSub:
-      name = MPVOption.Subtitles.secondarySid
+      setVideoTracks(index > 0 ? [index] : [])
+    case .sub, .secondSub:
+      let name = forType == .sub ? MPVOption.TrackSelection.sid : MPVOption.Subtitles.secondarySid
+      let otherName = forType == .sub ? MPVOption.Subtitles.secondarySid : MPVOption.TrackSelection.sid
+      // A source occupied by the other role is unavailable, never transferred.
+      guard index <= 0 || mpv.getInt(otherName) != index else { return }
+      mpv.setInt(name, index)
+      getSelectedTracks()
+      postNotification(.iinaSIDChanged)
     }
-    mpv.setInt(name, index)
-    getSelectedTracks()
   }
 
   func setSpeed(_ speed: Double) {
@@ -1326,20 +1814,24 @@ class PlayerCore: NSObject {
   }
 
   func setVideoAspect(_ aspect: String) {
-    if Regex.aspect.matches(aspect) {
-      mpv.setString(MPVOption.Video.videoAspectOverride, aspect)
-      info.unsureAspect = aspect
-    } else {
-      mpv.setString(MPVOption.Video.videoAspectOverride, "-1")
-      // if not a aspect string, set aspect to default, and also the info string.
-      info.unsureAspect = "Default"
+    let components = aspect.components(separatedBy: ":").compactMap(Double.init)
+    let valid = Regex.aspect.matches(aspect) && components.count == 2 &&
+      components.allSatisfy { $0.isFinite && $0 > 0 } && (components[0] / components[1]).isFinite
+    let ratio = valid ? components[0] / components[1] : -1
+    if abs(mpv.getDouble(MPVOption.Video.videoAspectOverride) - ratio) > 0.000001 {
+      mainWindow?.beginVideoAspectTransition()
     }
+    guard mpv.setString(MPVOption.Video.videoAspectOverride, valid ? aspect : "-1") >= 0 else {
+      mainWindow?.finishVideoAspectTransition()
+      return
+    }
+    info.unsureAspect = valid ? aspect : "Default"
   }
 
   func setVideoRotate(_ degree: Int) {
-    if AppData.rotations.firstIndex(of: degree)! >= 0 {
-      mpv.setInt(MPVOption.Video.videoRotate, degree)
-    }
+    guard AppData.rotations.contains(degree) else { return }
+    if mpv.getInt(MPVOption.Video.videoRotate) != degree { mainWindow?.beginVideoAspectTransition() }
+    mpv.setInt(MPVOption.Video.videoRotate, degree)
   }
 
   func setFlip(_ enable: Bool) {
@@ -1419,23 +1911,91 @@ class PlayerCore: NSObject {
   }
 
   func loadExternalAudioFile(_ url: URL) {
-    mpv.command(.audioAdd, args: [url.mpvStr], checkError: false) { code in
+    guard info.state.active else { return }
+    reconcileTrackGraph()
+    let active = info.activeTrackIDs(.audio)
+    let existing = Set(info.audioTracks.map(\.id))
+    // Selection belongs to our graph owner, including while mixing sources.
+    mpv.command(.audioAdd, args: [url.mpvStr, "auto"], checkError: false) { code in
       if code < 0 {
         self.log("Unsupported audio: \(url.mpvStr)", level: .error)
         DispatchQueue.main.async {
           Utility.showAlert("unsupported_audio")
         }
+        return
       }
+      self.getTrackInfo()
+      let added = Set(self.info.audioTracks.map(\.id)).subtracting(existing)
+      if !added.isEmpty { self.setAudioTracks(active.union(added)) }
+      self.postNotification(.iinaTracklistChanged)
     }
   }
 
+  @discardableResult
+  func removeExternalTrack(_ id: Int, type: MPVTrack.TrackType, order: [Int]) -> Bool {
+    guard info.state.active, type == .audio || type == .video,
+          info.trackList(type).contains(where: { $0.id == id && $0.isExternal }),
+          type != .video || !mainWindow.interactiveMode.isActive else { return false }
+    reconcileTrackGraph()
+    let graph = mpv.getString(MPVOption.Miscellaneous.lavfiComplex) ?? ""
+    guard graph.isEmpty || graph == ownedTrackGraph else {
+      Utility.showAlert("track_graph_conflict", sheetWindow: mainWindow.window)
+      return false
+    }
+    let available = info.trackList(type).map(\.id)
+    var ordered = order.filter { available.contains($0) }
+    ordered.append(contentsOf: available.filter { !ordered.contains($0) })
+    let active = info.activeTrackIDs(type)
+    let remaining = TrackSelectionState.selectionAfterRemoving(id, order: ordered, active: active)
+    let previousAudio = info.activeTrackIDs(.audio)
+    let previousVideo = info.activeTrackIDs(.video)
+    var videoOrder = (type == .video ? ordered : info.videoTrackOrder).filter { previousVideo.contains($0) }
+    videoOrder.append(contentsOf: previousVideo.sorted().filter { !videoOrder.contains($0) })
+    let oldInputs = persistentAudioInputs
+    let reconnect = active.contains(id) || (type == .audio && oldInputs?.contains(id) == true)
+    let startedTransition = type == .video && active.contains(id) && !remaining.isEmpty && mainWindow.beginVideoAspectTransition()
+    if reconnect, !applyTrackSelection(
+      audio: type == .audio ? remaining : previousAudio,
+      video: type == .video ? ordered.filter { remaining.contains($0) } : videoOrder,
+      changedType: type, soloID: remaining.sorted().first ?? 0, forceRebuild: true,
+      excludingAudioInput: type == .audio ? id : nil
+    ) {
+      if startedTransition { mainWindow.finishVideoAspectTransition() }
+      return false
+    }
+    var result: Int32 = -1
+    mpv.command(type == .audio ? .audioRemove : .videoRemove, args: [String(id)], checkError: false) { result = $0 }
+    getTrackInfo()
+    // mpv can report command success even if a connected input was not removed.
+    guard result >= 0, !info.trackList(type).contains(where: { $0.id == id }) else {
+      if reconnect {
+        persistentAudioInputs = oldInputs
+        _ = applyTrackSelection(audio: previousAudio, video: videoOrder, changedType: type,
+                               soloID: active.sorted().first ?? 0, forceRebuild: true)
+      }
+      if startedTransition { mainWindow.finishVideoAspectTransition() }
+      Utility.showAlert("track.remove_failed", sheetWindow: mainWindow.window)
+      return false
+    }
+    if type == .audio { scopedTrackSettings.audio.removeValue(forKey: id) }
+    else {
+      scopedTrackSettings.video.removeValue(forKey: id)
+      info.videoTrackOrder.removeAll { $0 == id }
+    }
+    let editingGroup: TrackSettingsGroup = type == .audio ? .audioDelay : .videoGeometry
+    if scopedTrackSettings.target(editingGroup) == id { scopedTrackSettings.setTarget(0, for: editingGroup) }
+    trackListChanged()
+    postNotification(.iinaTrackSettingsChanged)
+    return true
+  }
+
   /// Shows the Font Chooser window to select a new font for the player
-  func chooseSubFont() {
+  func chooseSubFont(forPrimary: Bool = true) {
     guard info.state.active else { return }
-    let subFont = mpv.getString(MPVOption.Subtitles.subFont)
+    let subFont = mpv.getString(SubtitleStyle.option(MPVOption.Subtitles.subFont, forPrimary: forPrimary))
     Utility.quickFontPickerWindow(selecting: subFont) { [self] result in
       if let result {
-        setSubFont(result)
+        setSubFont(result, forPrimary: forPrimary)
       }
     }
   }
@@ -1653,35 +2213,38 @@ class PlayerCore: NSObject {
   }
 
   func setCrop(fromString str: String) {
-    let vwidth = info.videoWidth!
-    let vheight = info.videoHeight!
     if let aspect = Aspect(string: str) {
-      let cropped = NSMakeSize(CGFloat(vwidth), CGFloat(vheight)).crop(withAspect: aspect)
-      let vf = MPVFilter.crop(w: Int(cropped.width), h: Int(cropped.height), x: nil, y: nil)
+      // Match Custom Crop's rotated output coordinates; file metadata may describe another video track.
+      let geometry = interactiveVideoGeometry(uncropped: true)
+      guard geometry.sourceSize.width > 0, geometry.sourceSize.height > 0,
+            aspect.value.isFinite, aspect.value > 0,
+            geometry.pixelAspectRatio.isFinite, geometry.pixelAspectRatio > 0 else { return }
+      let pixelAspect = Aspect(size: NSSize(width: aspect.value / geometry.pixelAspectRatio, height: 1))
+      let size = geometry.selectionSize.crop(withAspect: pixelAspect)
+      let selection = size.centeredRect(in: NSRect(origin: .zero, size: geometry.selectionSize))
+      let cropped = geometry.filterRect(for: selection)
+      guard cropped.width >= 1, cropped.height >= 1 else { return }
+      let vf = MPVFilter.crop(w: Int(cropped.width), h: Int(cropped.height),
+                              x: Int(cropped.minX), y: Int(cropped.minY), exact: true)
       vf.label = Constants.FilterName.crop
-      setCrop(fromFilter: vf)
-      // warning! may should not update it here
-      info.unsureCrop = str
-      info.cropFilter = vf
+      if setCrop(fromFilter: vf) { info.unsureCrop = str }
     } else {
-      if let filter = info.cropFilter {
-        let _ = removeVideoFilter(filter)
-        info.unsureCrop = "None"
-      }
+      removeCropFilter()
     }
   }
 
-  func setCrop(fromFilter filter: MPVFilter) {
+  @discardableResult
+  func setCrop(fromFilter filter: MPVFilter) -> Bool {
     filter.label = Constants.FilterName.crop
-    if addVideoFilter(filter) {
-      info.cropFilter = filter
-    }
+    guard addVideoFilter(filter) else { return false }
+    info.cropFilter = filter
+    return true
   }
 
   /// Remove the crop filter managed by IINA.
   func removeCropFilter() {
-    if let vf = info.cropFilter {
-      let _ = removeVideoFilter(vf)
+    if let vf = info.cropFilter, removeVideoFilter(vf) {
+      info.cropFilter = nil
       info.unsureCrop = "None"
     }
   }
@@ -1951,12 +2514,9 @@ class PlayerCore: NSObject {
   }
 
   /** Scale is a double value in [-100, -1] + [1, 100] */
-  func setSubScale(_ scale: Double) {
-    if scale > 0 {
-      mpv.setDouble(MPVOption.Subtitles.subScale, scale, level: .verbose)
-    } else {
-      mpv.setDouble(MPVOption.Subtitles.subScale, -scale, level: .verbose)
-    }
+  func setSubScale(_ scale: Double, forPrimary: Bool = true) {
+    mpv.setDouble(SubtitleStyle.option(MPVOption.Subtitles.subScale, forPrimary: forPrimary),
+                  abs(scale), level: .verbose)
   }
 
   func setSubPos(_ pos: Int, forPrimary: Bool = true) {
@@ -1964,28 +2524,39 @@ class PlayerCore: NSObject {
     mpv.setInt(option, pos, level: .verbose)
   }
 
-  func setSubTextColor(_ colorString: String) {
-    mpv.setString("options/" + MPVOption.Subtitles.subColor, colorString)
+  func resetSubtitleStyle(forPrimary: Bool = true) {
+    // Reset to saved startup style; factory defaults would change previously untouched subtitles.
+    setSubScale(1, forPrimary: forPrimary)
+    setSubFont(Preference.string(for: .subTextFont)!, forPrimary: forPrimary)
+    setSubTextSize(Double(Preference.float(for: .subTextSize)), forPrimary: forPrimary)
+    setSubTextColor(Preference.string(for: .subTextColorString)!, forPrimary: forPrimary)
+    setSubTextBorderSize(Double(Preference.float(for: .subBorderSize)), forPrimary: forPrimary)
+    setSubTextBorderColor(Preference.string(for: .subBorderColorString)!, forPrimary: forPrimary)
+    setSubTextBgColor(Preference.string(for: .subShadowColorString)!, forPrimary: forPrimary)
   }
 
-  func setSubTextSize(_ size: Double) {
-    mpv.setDouble("options/" + MPVOption.Subtitles.subFontSize, size)
+  func setSubTextColor(_ colorString: String, forPrimary: Bool = true) {
+    mpv.setString("options/" + SubtitleStyle.option(MPVOption.Subtitles.subColor, forPrimary: forPrimary), colorString)
+  }
+
+  func setSubTextSize(_ size: Double, forPrimary: Bool = true) {
+    mpv.setDouble("options/" + SubtitleStyle.option(MPVOption.Subtitles.subFontSize, forPrimary: forPrimary), size)
   }
 
   func setSubTextBold(_ bold: Bool) {
     mpv.setFlag("options/" + MPVOption.Subtitles.subBold, bold)
   }
 
-  func setSubTextBorderColor(_ colorString: String) {
-    mpv.setString("options/" + MPVOption.Subtitles.subOutlineColor, colorString)
+  func setSubTextBorderColor(_ colorString: String, forPrimary: Bool = true) {
+    mpv.setString("options/" + SubtitleStyle.option(MPVOption.Subtitles.subOutlineColor, forPrimary: forPrimary), colorString)
   }
 
-  func setSubTextBorderSize(_ size: Double) {
-    mpv.setDouble("options/" + MPVOption.Subtitles.subOutlineSize, size)
+  func setSubTextBorderSize(_ size: Double, forPrimary: Bool = true) {
+    mpv.setDouble("options/" + SubtitleStyle.option(MPVOption.Subtitles.subOutlineSize, forPrimary: forPrimary), size)
   }
 
-  func setSubTextBgColor(_ colorString: String) {
-    mpv.setString("options/" + MPVOption.Subtitles.subBackColor, colorString)
+  func setSubTextBgColor(_ colorString: String, forPrimary: Bool = true) {
+    mpv.setString("options/" + SubtitleStyle.option(MPVOption.Subtitles.subBackColor, forPrimary: forPrimary), colorString)
   }
 
   func setSubEncoding(_ encoding: String) {
@@ -1993,8 +2564,8 @@ class PlayerCore: NSObject {
     info.subEncoding = encoding
   }
 
-  func setSubFont(_ font: String) {
-    mpv.setString(MPVOption.Subtitles.subFont, font)
+  func setSubFont(_ font: String, forPrimary: Bool = true) {
+    mpv.setString(SubtitleStyle.option(MPVOption.Subtitles.subFont, forPrimary: forPrimary), font)
   }
 
   func savePlaybackPosition() {
@@ -2080,6 +2651,7 @@ class PlayerCore: NSObject {
     }
 
     MemoryUsage.shared.logUsage("after file started")
+    info.trackSelectionGeneration += 1
     info.justStartedFile = true
     info.disableOSDForFileLoading = true
 
@@ -2203,13 +2775,16 @@ class PlayerCore: NSObject {
     }
     // call `trackListChanged` to load tracks and check whether need to switch to music mode
     trackListChanged()
+    restoreVideoTrackGeometryForCurrentMedia()
+    prepareAudioMixer()
+    videoGeometryIsLoaded = true
     getPlaylist()
     getChapters()
     syncAbLoop()
     refreshSyncUITimer()
     touchBarSupport.setupTouchBarUI()
 
-    if info.aid == 0 {
+    if info.activeTrackIDs(.audio).isEmpty {
       mainWindow.muteButton.isHidden = true
       mainWindow.volumeSlider.isHidden = true
     }
@@ -2268,12 +2843,21 @@ class PlayerCore: NSObject {
 
   func aidChanged() {
     guard info.state.active else { return }
-    info.aid = Int(mpv.getInt(MPVOption.TrackSelection.aid))
+    info.aid = (info.mixedAudioTrackIDs.count == 1 ? info.mixedAudioTrackIDs.first : nil) ??
+      mpv.getInt(MPVOption.TrackSelection.aid)
     guard mainWindow.loaded else { return }
-    mainWindow?.muteButton.isHidden = (info.aid == 0)
-    mainWindow?.volumeSlider.isHidden = (info.aid == 0)
+    reconcileTrackGraph()
+    let hasAudio = !info.activeTrackIDs(.audio).isEmpty
+    mainWindow?.muteButton.isHidden = !hasAudio
+    mainWindow?.volumeSlider.isHidden = !hasAudio
     postNotification(.iinaAIDChanged)
-    sendOSD(.track(info.currentTrack(.audio) ?? .noneAudioTrack))
+    if info.mixedAudioTrackIDs.count > 1 {
+      sendOSD(.custom(String(format: NSLocalizedString("track.audio_mix_count", comment: "Active audio tracks"), info.mixedAudioTrackIDs.count)))
+    } else {
+      let track = info.currentTrack(.audio) ?? .noneAudioTrack
+      let position = info.orderedTrackList(.audio).firstIndex { $0.id == track.id }.map { $0 + 1 }
+      sendOSD(.track(track, position: position))
+    }
   }
 
   /// The mpv [audio-device-list](https://mpv.io/manual/stable/#command-interface-audio-device-list)
@@ -2418,6 +3002,7 @@ class PlayerCore: NSObject {
   }
 
   func playbackRestarted() {
+    mainWindow?.finishVideoAspectTransition()
     log("Playback restarted")
 
     // Important to synchronize the time as mpv may slightly alter the playback position during a
@@ -2540,6 +3125,13 @@ class PlayerCore: NSObject {
     log("Track list changed")
     getTrackInfo()
     getSelectedTracks()
+    if let inputs = persistentAudioInputs,
+       !inputs.isSubset(of: Set(info.audioTracks.map(\.id))) || !audioMixerInputsAreCompatible(inputs) {
+      let previous = info.activeTrackIDs(.audio)
+      var remaining = previous.intersection(info.audioTracks.map(\.id))
+      if remaining.isEmpty, !previous.isEmpty, let first = info.audioTracks.first { remaining = [first.id] }
+      setAudioTracks(remaining)
+    }
     let audioStatus = info.isAudio
 
     // Now Playing is first updated when the file starts, before the track list is known, so the
@@ -2595,8 +3187,16 @@ class PlayerCore: NSObject {
   func vidChanged() {
     guard info.state.active else { return }
     info.vid = Int(mpv.getInt(MPVOption.TrackSelection.vid))
+    reconcileTrackGraph()
     postNotification(.iinaVIDChanged)
-    sendOSD(.track(info.currentTrack(.video) ?? .noneVideoTrack))
+    let selected = info.activeTrackIDs(.video)
+    if selected.count <= 1 {
+      let track = info.videoTracks.first { selected.contains($0.id) } ?? .noneVideoTrack
+      let position = info.orderedTrackList(.video).firstIndex { $0.id == track.id }.map { $0 + 1 }
+      sendOSD(.track(track, position: position))
+    } else {
+      sendOSD(.custom(String(format: NSLocalizedString("track.video_layer_count", comment: "Active video layers"), info.layeredVideoTrackIDs.count)))
+    }
     if isInMiniPlayer {
       miniPlayer.refreshArtworkVisibility()
       miniPlayer.handleVideoSizeChange()
@@ -2605,7 +3205,8 @@ class PlayerCore: NSObject {
   }
 
   func windowScaleChanged() {
-    guard mainWindow.loaded, info.state.active else { return }
+    // Loading/watch-later notifications may still carry the previous file's scale or dimensions.
+    guard mainWindow.loaded, info.state.loaded, !info.justStartedFile, !info.justOpenedFile else { return }
     let windowScale = mpv.getDouble(MPVOption.Window.windowScale)
     if fabs(windowScale - info.cachedWindowScale) > 10e-10 {
       mainWindow.setWindowScale(windowScale)
@@ -2986,7 +3587,8 @@ class PlayerCore: NSObject {
   }
 
   func getSelectedTracks() {
-    info.aid = mpv.getInt(MPVOption.TrackSelection.aid)
+    info.aid = (info.mixedAudioTrackIDs.count == 1 ? info.mixedAudioTrackIDs.first : nil) ??
+      mpv.getInt(MPVOption.TrackSelection.aid)
     info.vid = mpv.getInt(MPVOption.TrackSelection.vid)
     info.sid = mpv.getInt(MPVOption.TrackSelection.sid)
     info.secondSid = mpv.getInt(MPVOption.Subtitles.secondarySid)
@@ -3098,6 +3700,18 @@ class PlayerCore: NSObject {
     }
   }
 
+  func interactiveVideoGeometry(uncropped: Bool) -> CropVideoGeometry {
+    let property = uncropped ? MPVProperty.videoParams : MPVProperty.videoOutParams
+    let width = mpv.getInt(property + "/w")
+    let height = mpv.getInt(property + "/h")
+    let displayWidth = mpv.getInt(property + "/dw")
+    let displayHeight = mpv.getInt(property + "/dh")
+    return CropVideoGeometry(
+      sourceSize: NSSize(width: width, height: height),
+      displaySize: NSSize(width: displayWidth, height: displayHeight),
+      rotation: mpv.getInt(property + "/rotate"))
+  }
+
   var originalVideoSize: (Int, Int) {
     get {
       if let w = info.videoWidth, let h = info.videoHeight {
@@ -3141,13 +3755,20 @@ class PlayerCore: NSObject {
   /** Check if there are IINA filters saved in watch_later file. */
   func reloadSavedIINAfilters() {
     // vf
+    let previousCrop = info.cropFilter
+    let previousCropDescription = info.unsureCrop
+    info.cropFilter = nil
+    info.unsureCrop = "None"
+    info.flipFilter = nil
+    info.mirrorFilter = nil
+    info.delogoFilter = nil
     let videoFilters = mpv.getFilters(MPVProperty.vf)
     for filter in videoFilters {
       guard let label = filter.label else { continue }
       switch label {
       case Constants.FilterName.crop:
         info.cropFilter = filter
-        info.unsureCrop = ""
+        info.unsureCrop = previousCrop?.isEqual(filter) == true ? previousCropDescription : ""
       case Constants.FilterName.flip:
         info.flipFilter = filter
       case Constants.FilterName.mirror:
@@ -3159,6 +3780,7 @@ class PlayerCore: NSObject {
       }
     }
     // af
+    info.audioEqFilter = nil
     let audioFilters = mpv.getFilters(MPVProperty.af)
     for filter in audioFilters {
       guard let label = filter.label else { continue }

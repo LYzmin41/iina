@@ -33,10 +33,10 @@ class MPVFilter: NSObject {
 
   // MARK: - Static filters
 
-  static func crop(w: Int?, h: Int?, x: Int?, y: Int?) -> MPVFilter {
-    let f = MPVFilter(name: "crop", label: nil,
-                      params: ["w": w?.description ?? "", "h": h?.description ?? "", "x": x?.description ?? "", "y": y?.description ?? ""])
-    return f
+  static func crop(w: Int?, h: Int?, x: Int?, y: Int?, exact: Bool = false) -> MPVFilter {
+    var params = ["w": w?.description ?? "", "h": h?.description ?? "", "x": x?.description ?? "", "y": y?.description ?? ""]
+    if exact { params["exact"] = "1" }
+    return MPVFilter(name: "crop", label: nil, params: params)
   }
 
   // FIXME: use lavfi vflip
@@ -88,6 +88,9 @@ class MPVFilter: NSObject {
         if type != nil, let format = MPVFilter.formats[type!] {
           str += "="
           str += format.components(separatedBy: ":").map { params![$0] ?? "" }.joined(separator: ":")
+          if type == .crop, let exact = params?["exact"] {
+            str += ":exact=\(exact.mpvQuotedFilterValue)"
+          }
           // else print param names
         } else {
           str += "="

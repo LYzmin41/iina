@@ -288,7 +288,11 @@ class PlayerWindowController: NSWindowController, NSWindowDelegate {
   func handleKeyBinding(_ keyBinding: KeyMapping) -> Bool {
     if keyBinding.isIINACommand {
       // - IINA command
-      if let iinaCommand = IINACommand(rawValue: keyBinding.rawAction) {
+      if let name = keyBinding.action.first, let iinaCommand = IINACommand(rawValue: name),
+         iinaCommand.acceptsArguments(Array(keyBinding.action.dropFirst())) {
+        if iinaCommand.isInterfaceCommand {
+          return handleInterfaceCommand(iinaCommand, arguments: Array(keyBinding.action.dropFirst()))
+        }
         handleIINACommand(iinaCommand)
         return true
       } else {
@@ -725,6 +729,10 @@ class PlayerWindowController: NSWindowController, NSWindowDelegate {
     default:
       break
     }
+  }
+
+  func handleInterfaceCommand(_ cmd: IINACommand, arguments: [String]) -> Bool {
+    return false
   }
 
   // MARK: - Utils

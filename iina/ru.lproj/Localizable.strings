@@ -571,6 +571,8 @@
 "sidebar.gamma" = "гамму";
 "sidebar.hue" = "Оттенок";
 
+"sidebar.add_audio_track" = "Добавить аудиодорожку…";
+"sidebar.add_video_track" = "Добавить видеодорожку…";
 "sidebar.load_external_audio" = "Подключить аудиодорожку…";
 "sidebar.delay" = "Задержка";
 
@@ -644,6 +646,7 @@
 "settings.screenshotSaveToFile.desc" = "/путь/к/папке/снимков/";
 "settings.screenshotSaveToFile.label" = "Сохранять в папку";
 "settings.screenshotShowPreview.label" = "Открывать окно предпросмотра после снимка";
+"settings.screenshotPlaySound.label" = "Звук снимка экрана";
 "settings.trackAllFilesInRecentOpenMenu.desc" = "Иначе в меню будут отображены только файлы, открытые вручную.";
 "settings.trackAllFilesInRecentOpenMenu.label" = "Показывать все открытые файлы в меню «Открыть недавние»";
 "settings.useLegacyFullScreen.label" = "Использовать устаревший полноэкранный режим";
@@ -1037,3 +1040,56 @@
 "settings.$toThe" = "от";
 "settings.$top" = "верхней";
 "settings.$ytdlWarning" = "У плагина Online Media есть дополнительные функции, такие как смена качества и загрузка видео. IINA сможет использовать плагин, если он установлен и включен. Настройки ниже работают только в том случае, если плагин недоступен.";
+
+/* Per-track settings */
+"track_settings.target" = "Настройки дорожки";
+"track_settings.configure" = "Настроить:";
+"track_settings.master" = "Общий звук";
+"track_settings.output" = "Итоговое изображение";
+"track_settings.reset_all" = "Сбросить всё";
+"track_settings.color" = "Цвет";
+
+/* Video LUT */
+"lut.none" = "Нет";
+"lut.import" = "Загрузить LUT…";
+"lut.invalid_file" = "Выбери корректный 3D LUT в формате .cube.";
+"alert.lut_import_failed" = "Не удалось загрузить LUT: %@";
+"alert.lut_apply_failed" = "Не удалось применить LUT. Сохранены предыдущие настройки.";
+
+/* External track removal */
+"track.remove_external" = "Убрать внешнюю дорожку";
+"alert.track.remove_failed" = "Не удалось убрать внешнюю дорожку.";
+
+"track_settings.track" = "Дорожка %ld";
+
+// LUT library removal
+"lut.remove" = "Удалить LUT…";
+"alert.lut_remove.title" = "Удалить LUT «%@»?";
+"alert.lut_remove.message" = "Копия LUT из библиотеки будет перемещена в Корзину и отключена во всех окнах. Исходный файл останется на месте.";
+"alert.lut_remove_failed" = "Не удалось переместить LUT в Корзину. Попробуй ещё раз.";
+"alert.lut_remove_crop" = "Заверши Custom Crop в окнах с этим LUT, затем попробуй удалить его снова.";
+
+// Shared track processing context
+"track_settings.settings" = "Настройки";
+"track_settings.geometry" = "Геометрия";
+"track_settings.playback" = "Воспроизведение";
+"track_settings.group_actions" = "Действия: %@";
+
+/* Processing group reset scopes */
+"track_settings.reset" = "Сбросить";
+"track_settings.reset_track" = "Сбросить дорожку";
+"track_settings.reset_numbered_track" = "Сбросить дорожку %ld";
+"track_settings.reset_output" = "Сбросить «%@»";
+"track_settings.reset_tracks" = "Сбросить все дорожки";
+"track_settings.reset_group" = "Сбросить настройки группы «%@».";
+"track_settings.selected_track" = "выбранной дорожки";
+"track_settings.reset_selected_hint" = "Сбросить настройки группы «%@» только для «%@».";
+"track_settings.reset_tracks_hint" = "Сбросить настройки группы «%@» для всех дорожек и «%@».";
+
+/* LUT library settings. */
+
+"settings.keepOSCHidden.desc" = "Курсор не возвращает OSC.";
+
+"sidebar.style" = "Стиль";
+
+"sidebar.adjustments" = "Корректировки";

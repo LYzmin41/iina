@@ -116,3 +116,27 @@
 "read.cycle-values" = "Переключить {{property}} между ({{{values}}})";
 "read.seek" = "Промотать {{#fwd}}вперед на{{/fwd}}{{#bwd}}назад на{{/bwd}}{{#abs}}от начала на{{/abs}} {{value}}{{#sec}} с{{/sec}}{{#per}}%{{/per}} {{#exact}}(точно){{/exact}}{{#kf}}(по кадрам){{/kf}}";
 "read.sub-seek" = "Переключить на {{#skip_1}}следующие{{/skip_1}}{{#skip_-1}}предыдущие{{/skip_-1}} субтитры";
+
+/* Interface actions */
+"iina.escape" = "Закрыть текущий слой интерфейса";
+"iina.close-sidebars" = "Закрыть все боковые панели";
+"iina.show-panel" = "Открыть панель";
+"iina.hide-panel" = "Закрыть панель";
+"iina.toggle-panel" = "Показать или скрыть панель";
+"iina.next-plugin" = "Следующий плагин";
+"iina.previous-plugin" = "Предыдущий плагин";
+"iina.open-plugin" = "Открыть плагин";
+"iina.show-osc" = "Показать OSC";
+"iina.hide-osc" = "Скрыть OSC";
+"iina.toggle-osc" = "Показать или скрыть OSC";
+"iina.reset-osc-position" = "Вернуть стандартную позицию OSC";
+"iina.configure-osc-position" = "Настроить расположение OSC";
+"iina.open-custom-crop" = "Открыть Custom Crop";
+"panel.settings" = "Настройки";
+"panel.layout" = "Расположение";
+"panel.video" = "Видео";
+"panel.audio" = "Аудио";
+"panel.sub" = "Субтитры";
+"panel.playlist" = "Плейлист";
+"panel.chapters" = "Главы";
+"panel.plugins" = "Плагины";

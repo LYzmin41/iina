@@ -89,6 +89,16 @@ class ViewLayer: CAOpenGLLayer {
   /// When `true` drawing will proceed even if mpv indicates nothing needs to be done.
   @Atomic private var forceDraw = false
 
+  // Preserve the native PiP transaction while it updates the hosted surface.
+  @Atomic var isHostedInPIP = false
+
+  @Atomic private var lastRenderedPixelSize: CGSize? = nil
+
+  private var pixelSize: CGSize {
+    CGSize(width: (bounds.width * contentsScale).rounded(),
+           height: (bounds.height * contentsScale).rounded())
+  }
+
   /// Indicates whether the view is being rendered as part of a live resizing operation.
   ///
   /// This flag is used to manage setting of the
@@ -128,6 +138,7 @@ class ViewLayer: CAOpenGLLayer {
     // when resized but mpv hasn't rendered a new frame,
     // the old content's aspect ratio should be preserved.
     contentsGravity = .resizeAspectFill
+    needsDisplayOnBoundsChange = true
   }
 
   /// Returns an initialized shadow copy of the given layer with custom instance variables copied from `layer`.
@@ -148,6 +159,9 @@ class ViewLayer: CAOpenGLLayer {
     backgroundColor = previousLayer.backgroundColor
     wantsExtendedDynamicRangeContent = previousLayer.wantsExtendedDynamicRangeContent
     contentsFormat = previousLayer.contentsFormat
+    // Ownership belongs to the shared surface, including its shadow copies.
+    _isHostedInPIP = previousLayer._isHostedInPIP
+    needsDisplayOnBoundsChange = true
     inLiveResize = previousLayer.inLiveResize
     isAsynchronous = previousLayer.isAsynchronous
     Logger.log("Created view layer shadow copy")
@@ -169,7 +183,10 @@ class ViewLayer: CAOpenGLLayer {
       if !inLiveResize {
         isAsynchronous = false
       }
-      return forceDraw || videoView.player.mpv.shouldRenderUpdateFrame()
+      let size = pixelSize
+      guard size.width > 0, size.height > 0 else { return false }
+      // Core Animation can resize a paused surface without an mpv update; render in display(), never layout.
+      return forceDraw || lastRenderedPixelSize != size || videoView.player.mpv.shouldRenderUpdateFrame()
     }
   }
 
@@ -209,6 +226,7 @@ class ViewLayer: CAOpenGLLayer {
                 mpv_render_param()
               ]
               mpv_render_context_render(context, &params)
+              lastRenderedPixelSize = CGSize(width: Int(dims[2]), height: Int(dims[3]))
               ignoreGLError()
             }
           }
@@ -281,10 +299,10 @@ class ViewLayer: CAOpenGLLayer {
       CATransaction.commit()
     }
 
-    // The call to commit will not render the explicit transaction if it is nested in an implicit
-    // transaction. This can happen when drawing is being forced after a change to the view such as
-    // resizing. Must call flush to ensure any implicit transaction is flushed.
-    CATransaction.flush()
+    // Never flush native PiP's main-thread transaction: bounds and surface must publish together.
+    if !Thread.isMainThread || !isHostedInPIP {
+      CATransaction.flush()
+    }
 
     guard isUpdate && needsFlip else { return }
 
@@ -318,6 +336,26 @@ class ViewLayer: CAOpenGLLayer {
       needsFlip = true
       display()
     }
+  }
+
+  /// A new native host can allocate a fresh surface even at the same pixel size.
+  func invalidatePIPDisplay() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    lastRenderedPixelSize = nil
+    setNeedsDisplay()
+  }
+
+  /// Only PiP host/geometry handoffs render on main; regular playback stays on mpvGLQueue.
+  func displayForPIPHandoff() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    mainThreadPriorityLock.beforeLocking()
+    displayLock.lock()
+    defer { displayLock.unlock() }
+    mainThreadPriorityLock.afterLocked()
+    // Hold display()'s lock so a queued playback update cannot consume the forced draw first.
+    forceDraw = true
+    needsFlip = true
+    display()
   }
 
   private func framebufferSnapshot(width: Int, height: Int) -> NSImage? {

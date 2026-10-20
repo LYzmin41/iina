@@ -7,6 +7,19 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		786C6F63C38B4C4CACDB3F3B /* VideoLUT.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5752C3C144263AC8B9A57 /* VideoLUT.swift */; };
+		A13A908073214B75B084DC4B /* TrackVideoProcessing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 291A040D5E074E7D8D073E8E /* TrackVideoProcessing.swift */; };
+		66636A40E2D14C51A294E892 /* TrackAudioProcessing.swift in Sources */ = {isa = PBXBuildFile; fileRef = F55097E0F7BF470E83896245 /* TrackAudioProcessing.swift */; };
+		E4298BCA45A944D790DABE1D /* TrackSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3E5A5D21430400BB9CE4E6A /* TrackSettings.swift */; };
+		236F7BBC84CF4267B5204C7D /* TrackProcessingState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 953641C73A184576A5FF21A8 /* TrackProcessingState.swift */; };
+		085BC1B8446F4CAAB04B1106 /* ResizeCursor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44D2922A163E46FE8EF4F348 /* ResizeCursor.swift */; };
+		0A2CFE93C09E4DE497B8E3B4 /* ScrollSelectionControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65766A58A8BE4C399DE2D2AD /* ScrollSelectionControl.swift */; };
+		F21A9630DD044391BC0A4231 /* FloatingOSCPositionPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21A9630DD044391BC0A4232 /* FloatingOSCPositionPreferences.swift */; };
+		62BCE669C0774290B9FA75B8 /* FloatingOSCScale.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B04542AC9A34A80A37FAF38 /* FloatingOSCScale.swift */; };
+		61BAC4BD24994EA4BB918679 /* WindowGeometrySettingsSheetController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D337551D25824E0BA34132B6 /* WindowGeometrySettingsSheetController.swift */; };
+		D0E2567242904D179A565DC5 /* InitialWindowGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04460BB58EFF44D68E61BBE0 /* InitialWindowGeometry.swift */; };
+		EF1642DC2E5140D8A0DA7DEC /* PositionPreviewDrawing.swift in Sources */ = {isa = PBXBuildFile; fileRef = F000F1FD609C4A51A6FFD35A /* PositionPreviewDrawing.swift */; };
+		C8DB46CC2C9D4E3F936C053E /* OSCPositionSettingsSheetController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A131C56A51F046EAB150DFFF /* OSCPositionSettingsSheetController.swift */; };
 		1326717E20852D0D000FA7E2 /* SubChooseViewController.xib in Resources */ = {isa = PBXBuildFile; fileRef = 1326718020852D0D000FA7E2 /* SubChooseViewController.xib */; };
 		3412DB8E2C2FC64C00BBC142 /* Equalizations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3412DB8D2C2FC64800BBC142 /* Equalizations.swift */; };
 		3415BC8A2FC82FD9003B3FBD /* TimePreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3415BC892FC82FD5003B3FBD /* TimePreviewView.swift */; };
@@ -359,6 +372,7 @@
 		E3BBBBBB0000000000000004 /* SettingsPageAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3BBBBBB0000000000000003 /* SettingsPageAudio.swift */; };
 		E3C12F6B201F281F00297964 /* FirstRunManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3C12F6A201F281F00297964 /* FirstRunManager.swift */; };
 		E3C228072FDF4E0C009A1A89 /* SidebarVideoPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3C228062FDF4E02009A1A89 /* SidebarVideoPane.swift */; };
+		7900C623150A413BADDEBEC6 /* TrackSelectionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 297AC4181CDF4827A77462CF /* TrackSelectionState.swift */; };
 		E3C228092FDF5EFF009A1A89 /* SidebarTrackSelector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3C228082FDF5EF8009A1A89 /* SidebarTrackSelector.swift */; };
 		E3C2280B2FDFB7C7009A1A89 /* SidebarAudioPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3C2280A2FDFB7C1009A1A89 /* SidebarAudioPane.swift */; };
 		E3C2280D2FDFBE30009A1A89 /* SidebarSliderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3C2280C2FDFBE25009A1A89 /* SidebarSliderView.swift */; };
@@ -534,6 +548,19 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		69E5752C3C144263AC8B9A57 /* VideoLUT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoLUT.swift; sourceTree = "<group>"; };
+		291A040D5E074E7D8D073E8E /* TrackVideoProcessing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackVideoProcessing.swift; sourceTree = "<group>"; };
+		F55097E0F7BF470E83896245 /* TrackAudioProcessing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackAudioProcessing.swift; sourceTree = "<group>"; };
+		E3E5A5D21430400BB9CE4E6A /* TrackSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackSettings.swift; sourceTree = "<group>"; };
+		953641C73A184576A5FF21A8 /* TrackProcessingState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackProcessingState.swift; sourceTree = "<group>"; };
+		44D2922A163E46FE8EF4F348 /* ResizeCursor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResizeCursor.swift; sourceTree = "<group>"; };
+		65766A58A8BE4C399DE2D2AD /* ScrollSelectionControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollSelectionControl.swift; sourceTree = "<group>"; };
+		F21A9630DD044391BC0A4232 /* FloatingOSCPositionPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingOSCPositionPreferences.swift; sourceTree = "<group>"; };
+		7B04542AC9A34A80A37FAF38 /* FloatingOSCScale.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingOSCScale.swift; sourceTree = "<group>"; };
+		D337551D25824E0BA34132B6 /* WindowGeometrySettingsSheetController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowGeometrySettingsSheetController.swift; sourceTree = "<group>"; };
+		04460BB58EFF44D68E61BBE0 /* InitialWindowGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialWindowGeometry.swift; sourceTree = "<group>"; };
+		F000F1FD609C4A51A6FFD35A /* PositionPreviewDrawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PositionPreviewDrawing.swift; sourceTree = "<group>"; };
+		A131C56A51F046EAB150DFFF /* OSCPositionSettingsSheetController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSCPositionSettingsSheetController.swift; sourceTree = "<group>"; };
 		0507C25E2B5617650043AD05 /* he */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = he; path = he.lproj/MainMenu.strings; sourceTree = "<group>"; };
 		0507C25F2B5617660043AD05 /* he */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = he; path = he.lproj/MainWindowController.strings; sourceTree = "<group>"; };
 		0507C2622B5617660043AD05 /* he */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = he; path = he.lproj/InspectorWindowController.strings; sourceTree = "<group>"; };
@@ -1719,6 +1746,7 @@
 		E3BBBBBB0000000000000003 /* SettingsPageAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsPageAudio.swift; sourceTree = "<group>"; };
 		E3C12F6A201F281F00297964 /* FirstRunManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunManager.swift; sourceTree = "<group>"; };
 		E3C228062FDF4E02009A1A89 /* SidebarVideoPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarVideoPane.swift; sourceTree = "<group>"; };
+		297AC4181CDF4827A77462CF /* TrackSelectionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackSelectionState.swift; sourceTree = "<group>"; };
 		E3C228082FDF5EF8009A1A89 /* SidebarTrackSelector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarTrackSelector.swift; sourceTree = "<group>"; };
 		E3C2280A2FDFB7C1009A1A89 /* SidebarAudioPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarAudioPane.swift; sourceTree = "<group>"; };
 		E3C2280C2FDFBE25009A1A89 /* SidebarSliderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarSliderView.swift; sourceTree = "<group>"; };
@@ -2505,6 +2533,10 @@
 				E38099BD2FC05B2E00D3333E /* SettingsPagePlugin.swift */,
 				E38099BE2FC05B2E00D3333E /* SettingsPageSubtitles.swift */,
 				E38099BF2FC05B2E00D3333E /* SettingsPageUI.swift */,
+				A131C56A51F046EAB150DFFF /* OSCPositionSettingsSheetController.swift */,
+				D337551D25824E0BA34132B6 /* WindowGeometrySettingsSheetController.swift */,
+				04460BB58EFF44D68E61BBE0 /* InitialWindowGeometry.swift */,
+				F000F1FD609C4A51A6FFD35A /* PositionPreviewDrawing.swift */,
 				E38099C02FC05B2E00D3333E /* SettingsPageUtilities.swift */,
 				E3BBBBBB0000000000000001 /* SettingsPageVideo.swift */,
 				E3BBBBBB0000000000000003 /* SettingsPageAudio.swift */,
@@ -2525,6 +2557,8 @@
 			children = (
 				84A0BA9C1D2FAD4000BC8DA1 /* MainWindowController.swift */,
 				E31E63002FDB96E9005527B2 /* FadeableViewController.swift */,
+				7B04542AC9A34A80A37FAF38 /* FloatingOSCScale.swift */,
+				F21A9630DD044391BC0A4232 /* FloatingOSCPositionPreferences.swift */,
 				E31E62FE2FD90284005527B2 /* OSCFloatingView.swift */,
 				E31E62FC2FD8F4C5005527B2 /* OSCBottomView.swift */,
 				E3D94E7D2FCDE42C00B08618 /* Titlebar.swift */,
@@ -2534,6 +2568,8 @@
 				3465CC8E2FC7217C008DBFB6 /* BufferIndicatorView.swift */,
 				E3A239A72FC6D44D00CE6ACC /* TranslucentView.swift */,
 				E3B93C862FE9F77000803513 /* InteractiveMode.swift */,
+				44D2922A163E46FE8EF4F348 /* ResizeCursor.swift */,
+				65766A58A8BE4C399DE2D2AD /* ScrollSelectionControl.swift */,
 				34C4D19B2FC58482006B829F /* LiveTextSupport.swift */,
 			);
 			name = MainWindow;
@@ -2543,6 +2579,12 @@
 			isa = PBXGroup;
 			children = (
 				E3C2280C2FDFBE25009A1A89 /* SidebarSliderView.swift */,
+				297AC4181CDF4827A77462CF /* TrackSelectionState.swift */,
+				69E5752C3C144263AC8B9A57 /* VideoLUT.swift */,
+				291A040D5E074E7D8D073E8E /* TrackVideoProcessing.swift */,
+				F55097E0F7BF470E83896245 /* TrackAudioProcessing.swift */,
+				E3E5A5D21430400BB9CE4E6A /* TrackSettings.swift */,
+				953641C73A184576A5FF21A8 /* TrackProcessingState.swift */,
 				E3C228082FDF5EF8009A1A89 /* SidebarTrackSelector.swift */,
 				E3A239AD2FC7267000CE6ACC /* SideBar.swift */,
 				E3A239C02FCB4D2400CE6ACC /* SidebarController.swift */,
@@ -3003,10 +3045,22 @@
 				E38099C62FC05B2E00D3333E /* SettingsPageKeyBindings.swift in Sources */,
 				E38099C72FC05B2E00D3333E /* SettingsPageNetwork.swift in Sources */,
 				E38099C82FC05B2E00D3333E /* SettingsPagePlugin.swift in Sources */,
+				62BCE669C0774290B9FA75B8 /* FloatingOSCScale.swift in Sources */,
+				F21A9630DD044391BC0A4231 /* FloatingOSCPositionPreferences.swift in Sources */,
 				E31E62FF2FD90288005527B2 /* OSCFloatingView.swift in Sources */,
+				7900C623150A413BADDEBEC6 /* TrackSelectionState.swift in Sources */,
+				786C6F63C38B4C4CACDB3F3B /* VideoLUT.swift in Sources */,
+				A13A908073214B75B084DC4B /* TrackVideoProcessing.swift in Sources */,
+				66636A40E2D14C51A294E892 /* TrackAudioProcessing.swift in Sources */,
+				E4298BCA45A944D790DABE1D /* TrackSettings.swift in Sources */,
+				236F7BBC84CF4267B5204C7D /* TrackProcessingState.swift in Sources */,
 				E3C228092FDF5EFF009A1A89 /* SidebarTrackSelector.swift in Sources */,
 				E38099C92FC05B2E00D3333E /* SettingsPageSubtitles.swift in Sources */,
 				E38099CA2FC05B2E00D3333E /* SettingsPageUI.swift in Sources */,
+				C8DB46CC2C9D4E3F936C053E /* OSCPositionSettingsSheetController.swift in Sources */,
+				61BAC4BD24994EA4BB918679 /* WindowGeometrySettingsSheetController.swift in Sources */,
+				D0E2567242904D179A565DC5 /* InitialWindowGeometry.swift in Sources */,
+				EF1642DC2E5140D8A0DA7DEC /* PositionPreviewDrawing.swift in Sources */,
 				E38099CB2FC05B2E00D3333E /* SettingsPageUtilities.swift in Sources */,
 				E3AD62792FF8C19A00D2CAC5 /* VolumeButton.swift in Sources */,
 				E3A239AC2FC70EC300CE6ACC /* AdditionalInfoView.swift in Sources */,
@@ -3072,6 +3126,8 @@
 				E3FEC1332A30400F00CFD845 /* PluginInputManager.swift in Sources */,
 				8407D1401E3A684C0043895D /* ViewLayer.swift in Sources */,
 				E3B93C872FE9F77600803513 /* InteractiveMode.swift in Sources */,
+				085BC1B8446F4CAAB04B1106 /* ResizeCursor.swift in Sources */,
+				0A2CFE93C09E4DE497B8E3B4 /* ScrollSelectionControl.swift in Sources */,
 				E3D94E822FD0649A00B08618 /* UIHelper.swift in Sources */,
 				E3A239B12FCB4D0900CE6ACC /* SidebarPane.swift in Sources */,
 				51165FC02E1D91940060B817 /* ReadWriteLock.swift in Sources */,
