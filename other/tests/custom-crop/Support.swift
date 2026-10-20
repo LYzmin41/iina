@@ -150,6 +150,10 @@ class LiveTextFixture {
   func requestAnalysis() { requests += 1 }
 }
 class MainWindowController {
+  var isCropExitInProgress = false
+  func prepareCropExit(selection: NSRect, sourceSize: NSSize, initialFrame: NSRect, completion: @escaping () -> Bool) {
+    _ = completion()
+  }
   struct FloatingOSCFixture { func cancelPositionAnimation() {} }
   let oscFloatingView = FloatingOSCFixture()
   let player = PlayerFixture()

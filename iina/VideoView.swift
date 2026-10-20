@@ -109,6 +109,7 @@ class VideoView: NSView {
       isUninited = true
 
       stopDisplayLink()
+      videoLayer.cancelSnapshots()
       player.mpv.mpvUninitRendering()
     }
   }

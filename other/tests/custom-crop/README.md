@@ -133,3 +133,20 @@ window sizing, aspect-lock and explicit-scale methods across reconfiguration.
 
 Save and Cancel restoring a crop wait for MPV output geometry; no-filter exits
 refresh immediately without an intermediate uncropped sizing pass.
+
+## Exact crop color regression
+
+To exercise the generated production filter through the installed custom engine:
+
+```sh
+mkdir -p build/crop-color-tests
+CROP_FILTER_OUTPUT="$PWD/build/crop-color-tests/filters.json" bash other/tests/custom-crop/run.sh
+python3 other/tests/custom-crop/engine.py build/crop-color-tests /Applications/LYINA.app/Contents/Frameworks/libmpv.2.dylib
+```
+
+An unsafe NV12 odd-x control must reproduce the color shift. The production filter
+must retain normal colors at the exact odd coordinates for NV12, P010/P016,
+planar YUV and RGB, with exact output dimensions. A separate HDR-tagged 16-bit
+ramp checks source-pixel origin and adjacent luma values without an 8-bit hop.
+Native tests also cover protected-filter readback, raw serialization, legacy
+crop restoration, and the unchanged direct path for aligned rectangles.

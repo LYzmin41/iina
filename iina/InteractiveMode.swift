@@ -10,6 +10,54 @@ import Cocoa
 
 fileprivate let ui = UIHelper.shared
 
+final class CropExitOverlay: NSView {
+  let imageView = NSImageView()
+  var isPreparing = true
+  var isFinishing = false
+  var hasStartedAnimation = false
+  var animationComplete = false
+  var hasRenderedVideo = false
+
+  override init(frame: NSRect) {
+    super.init(frame: frame)
+    autoresizingMask = [.width, .height]
+    wantsLayer = true
+    layer?.masksToBounds = true
+    imageView.imageScaling = .scaleProportionallyUpOrDown
+    imageView.wantsLayer = true
+    addSubview(imageView)
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    bounds.contains(convert(point, from: superview)) ? self : nil
+  }
+
+  func show(_ image: NSImage, selection: NSRect, sourceSize: NSSize, initialFrame: NSRect) {
+    let region = NSRect(x: selection.minX * image.size.width / sourceSize.width,
+                        y: selection.minY * image.size.height / sourceSize.height,
+                        width: selection.width * image.size.width / sourceSize.width,
+                        height: selection.height * image.size.height / sourceSize.height)
+    imageView.image = NSImage(size: initialFrame.size, flipped: false) { target in
+      image.draw(in: target, from: region, operation: .copy, fraction: 1)
+      return true
+    }
+    imageView.frame = initialFrame
+    layer?.backgroundColor = NSColor.black.cgColor
+  }
+
+  func finish(frame: NSRect, duration: TimeInterval, completion: @escaping () -> Void) {
+    NSAnimationContext.runAnimationGroup { context in
+      context.duration = duration
+      context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      imageView.animator().frame = frame
+    } completionHandler: {
+      completion()
+    }
+  }
+}
+
 class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegate {
   enum Mode {
     case crop, delogo
@@ -152,7 +200,7 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   }
 
   func enter(mode: Mode, selectWholeVideoByDefault: Bool = false) {
-    guard !isActive, let window = mainWindow.window else { return }
+    guard !isActive, !mainWindow.isCropExitInProgress, let window = mainWindow.window else { return }
     reloadAspectPresets()
     let player = mainWindow.player
     videoGeometry = (mode == .crop ? player.scopedCropPreview?.geometry : nil) ?? player.interactiveVideoGeometry(uncropped: mode == .crop)
@@ -240,6 +288,7 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     guard isActive, currentMode == .crop else { return event }
     let parentModifierEvent = event.type == .flagsChanged && event.window == nil && mainWindow.window?.isKeyWindow == true
     guard event.window === mainWindow.window || parentModifierEvent else { return event }
+    if mainWindow.isCropExitInProgress { return nil }
     guard !isTrackingEditorMenu else {
       // A transient popover can leave keyboard focus on its parent window.
       (aspectPopover?.contentViewController as? CropAspectPresetListController)?
@@ -653,24 +702,39 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   private func cropAction() {
     let player = mainWindow.player
     let isFullFrame = isFullFrameSelected
-    if player.scopedCropPreview != nil {
-      let crop = isFullFrame ? nil : TrackVideoCrop(x: cropx, y: cropy, width: cropw, height: croph)
-      guard player.finishScopedCustomCrop(crop: crop, applying: true) else { return }
-      exit(applyingCrop: true)
-      return
-    }
-    if !isFullFrame {
-      let filter = MPVFilter.crop(w: cropw, h: croph, x: cropx, y: cropy, exact: true)
-      guard player.setCrop(fromFilter: filter) else { return }
-    }
-    exit(applyingCrop: true) {
-      if isFullFrame {
-        player.removeCropFilter()
-        return
+    let crop = isFullFrame ? nil : TrackVideoCrop(x: cropx, y: cropy, width: cropw, height: croph)
+    prepareExit(selection: cropBoxView.selectedRect) { [self] in
+      if player.scopedCropPreview != nil {
+        guard player.finishScopedCustomCrop(crop: crop, applying: true) else { return false }
+        exit(applyingCrop: true)
+        return true
       }
-      player.info.unsureCrop = ""
-      player.sendOSD(.crop(self.readableCropString))
+      if let crop {
+        let filter = MPVFilter.crop(w: crop.width, h: crop.height, x: crop.x, y: crop.y, exact: true)
+        guard player.setCrop(fromFilter: filter) else { return false }
+      }
+      exit(applyingCrop: true) {
+        if isFullFrame {
+          player.removeCropFilter()
+          return
+        }
+        player.info.unsureCrop = ""
+        player.sendOSD(.crop(self.readableCropString))
+      }
+      return true
     }
+  }
+
+  private func prepareExit(selection: NSRect, completion: @escaping () -> Bool) {
+    let image = cropBoxView.imageRect
+    let size = cropBoxView.videoSize
+    let rect = NSRect(x: image.minX + selection.minX * image.width / size.width,
+                      y: image.minY + selection.minY * image.height / size.height,
+                      width: selection.width * image.width / size.width,
+                      height: selection.height * image.height / size.height)
+    mainWindow.prepareCropExit(selection: selection, sourceSize: size,
+                               initialFrame: cropBoxView.convert(rect, to: mainWindow.videoViewContainer),
+                               completion: completion)
   }
 
   private func delogoAction() {
@@ -689,7 +753,10 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   }
 
   @objc private func cancelAction(_ sender: AnyObject) {
-    exit()
+    guard currentMode == .crop else { exit(); return }
+    let selection = originalCropFilter.flatMap { selectionRect(for: $0) } ??
+      NSRect(origin: .zero, size: cropBoxView.videoSize)
+    prepareExit(selection: selection) { [self] in exit(); return true }
   }
 }
 

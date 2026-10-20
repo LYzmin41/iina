@@ -43,9 +43,28 @@ func delogoParameters(_ filter: MPVFilter?) -> [String: String]? {
   })
 }
 check(MPVFilter.crop(w: 640, h: 360, x: nil, y: nil).stringFormat == "crop=640:360::", "existing automatic crop serialization stays unchanged")
-check(MPVFilter.crop(w: 501, h: 301, x: 101, y: 166, exact: true).stringFormat == "crop=501:301:101:166:exact=1", "exact pixel option reaches the actual mpv filter string")
+let protectedCrop = MPVFilter.crop(w: 501, h: 301, x: 101, y: 166, exact: true)
+check(protectedCrop.stringFormat.hasPrefix("lavfi=[format=pix_fmts=") &&
+      protectedCrop.stringFormat.hasSuffix(",crop=501:301:101:166:exact=1]"),
+      "odd exact pixel crop converts chroma before the unchanged source-pixel coordinates")
 let restoredExactFilter = MPVFilter(name: "crop", label: "iina_crop", params: ["w": "501", "h": "301", "x": "230", "y": "120", "exact": "1"])
-check(restoredExactFilter.stringFormat == "@iina_crop:crop=501:301:230:120:exact=1", "filter parameters read back from mpv retain exact cropping on Cancel and persistence")
+check(restoredExactFilter.stringFormat.hasPrefix("@iina_crop:lavfi=[format=pix_fmts=") &&
+      restoredExactFilter.stringFormat.hasSuffix(",crop=501:301:230:120:exact=1]"),
+      "old persisted exact crops gain chroma protection without losing their coordinates")
+let graphStart = protectedCrop.stringFormat.index(after: protectedCrop.stringFormat.firstIndex(of: "[")!)
+let protectedGraph = String(protectedCrop.stringFormat[graphStart..<protectedCrop.stringFormat.index(before: protectedCrop.stringFormat.endIndex)])
+let engineCrop = MPVFilter(name: "lavfi", label: nil, params: ["graph": protectedGraph])
+check(engineCrop.isEqual(protectedCrop) && engineCrop.params == protectedCrop.params,
+      "mpv's lavfi readback restores the logical crop for editor selection and persistence")
+check(MPVFilter(rawString: protectedCrop.stringFormat)?.isEqual(protectedCrop) == true,
+      "raw protected crop round-trips through the existing filter abstraction")
+check(MPVFilter.crop(w: 640, h: 360, x: 100, y: 80, exact: true).stringFormat == "crop=640:360:100:80:exact=1",
+      "aligned exact crops keep the direct filter without a format conversion")
+if let path = ProcessInfo.processInfo.environment["CROP_FILTER_OUTPUT"] {
+  let filter = MPVFilter.crop(w: 31, h: 21, x: 5, y: 7, exact: true)
+  try! JSONSerialization.data(withJSONObject: ["filter": filter.stringFormat], options: [.prettyPrinted])
+    .write(to: URL(fileURLWithPath: path))
+}
 let ratioGeometry = CropVideoGeometry(sourceSize: NSSize(width: 1920, height: 1080),
                                      displaySize: NSSize(width: 1920, height: 1080), rotation: 0)
 for (size, title) in [(NSSize(width: 900, height: 420), "15:7"),
@@ -1843,6 +1862,10 @@ let outsideKeyboardEditor = MainWindowController()
 let otherWindowEscape = editorKey(53, in: outsideKeyboardEditor, time: escapeTime + 0.15)
 check(keyboardEditor.interactiveMode.handleEditorEvent(otherWindowEscape) === otherWindowEscape,
       "crop shortcuts do not consume events belonging to another window")
+keyboardEditor.isCropExitInProgress = true
+check(keyboardEditor.interactiveMode.handleEditorEvent(otherWindowEscape) === otherWindowEscape,
+      "pending crop exit leaves another player's keyboard events untouched")
+keyboardEditor.isCropExitInProgress = false
 let modifiedReturn = editorKey(36, in: keyboardEditor, time: 12, modifiers: .command)
 check(keyboardEditor.interactiveMode.handleEditorEvent(modifiedReturn) === modifiedReturn && keyboardEditor.interactiveMode.isActive,
       "modified Return remains available to existing application bindings")

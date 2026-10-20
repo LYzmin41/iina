@@ -237,14 +237,10 @@ class ViewLayer: CAOpenGLLayer {
       }
       glFlush()
 
-      let handler = snapshotLock.withLock { () -> ((NSImage?) -> Void)? in
-        let handler = pendingSnapshotHandler
-        pendingSnapshotHandler = nil
-        return handler
-      }
-      if let handler {
+      let handlers = takeSnapshotHandlers()
+      if !handlers.isEmpty {
         let image = framebufferSnapshot(width: Int(dims[2]), height: Int(dims[3]))
-        handler(image)
+        handlers.forEach { $0(image) }
       }
     }
   }
@@ -252,21 +248,39 @@ class ViewLayer: CAOpenGLLayer {
   // MARK: - Snapshot
 
   private let snapshotLock = Lock()
-  private var pendingSnapshotHandler: ((NSImage?) -> Void)?
+  private var pendingSnapshotHandlers: [(NSImage?) -> Void] = []
+  private var snapshotsClosed = false
+
+  private func takeSnapshotHandlers() -> [(NSImage?) -> Void] {
+    snapshotLock.withLock {
+      let handlers = pendingSnapshotHandlers
+      pendingSnapshotHandlers.removeAll()
+      return handlers
+    }
+  }
+
+  func cancelSnapshots() {
+    let handlers = snapshotLock.withLock {
+      snapshotsClosed = true
+      let handlers = pendingSnapshotHandlers
+      pendingSnapshotHandlers.removeAll()
+      return handlers
+    }
+    handlers.forEach { $0(nil) }
+  }
 
   /// Capture the next rendered frame as an `NSImage`. Forces a redraw so this works while paused.
   func captureSnapshot() async -> NSImage? {
     await withCheckedContinuation { continuation in
-      // Drop any previous in-flight request — only the latest caller wins.
-      let previous = snapshotLock.withLock { () -> ((NSImage?) -> Void)? in
-        let previous = pendingSnapshotHandler
-        pendingSnapshotHandler = { image in
+      // Live Text and the crop handoff can need the same frame concurrently.
+      let accepted = snapshotLock.withLock {
+        guard !snapshotsClosed else { return false }
+        pendingSnapshotHandlers.append { image in
           continuation.resume(returning: image)
         }
-        return previous
+        return true
       }
-      previous?(nil)
-      update(force: true)
+      if accepted { update(force: true) } else { continuation.resume(returning: nil) }
     }
   }
 

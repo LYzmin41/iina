@@ -114,6 +114,8 @@ class MainWindowController: PlayerWindowController {
   private var videoTransformWindowArea: CGFloat?
   private var videoTransformWindowSize: NSSize?
   private var videoAspectTransition: (panscan: Double, mediaGeneration: Int)?
+  private var cropExitOverlay: CropExitOverlay?
+  var isCropExitInProgress: Bool { cropExitOverlay != nil }
 
   var videoAspectTransitionOriginalPanscan: Double? {
     guard let transition = videoAspectTransition,
@@ -1599,6 +1601,7 @@ class MainWindowController: PlayerWindowController {
   }
 
   func windowWillClose(_ notification: Notification) {
+    cancelCropExitTransition()
     finishVideoAspectTransition()
     isSeekingWithSlider = false
     interactiveMode.exit()
@@ -2149,6 +2152,67 @@ class MainWindowController: PlayerWindowController {
       view?.needsUpdateConstraints = true
       view?.needsLayout = true
     }
+  }
+
+  func prepareCropExit(selection: NSRect, sourceSize: NSSize, initialFrame: NSRect,
+                       completion: @escaping () -> Bool) {
+    guard cropExitOverlay == nil, !selection.isEmpty, sourceSize.width > 0, sourceSize.height > 0 else { return }
+    let overlay = CropExitOverlay(frame: videoViewContainer.bounds)
+    cropExitOverlay = overlay
+    videoViewContainer.addSubview(overlay, positioned: .above, relativeTo: nil)
+    let generation = player.info.trackSelectionGeneration
+    Task { @MainActor [weak self, weak overlay] in
+      guard let self, let overlay else { return }
+      let image = await videoView.videoLayer.captureSnapshot()
+      guard cropExitOverlay === overlay else { return }
+      guard player.info.state.active, player.info.trackSelectionGeneration == generation,
+            interactiveMode.isActive else { cancelCropExitTransition(); return }
+      if let image {
+        overlay.show(image, selection: selection, sourceSize: sourceSize, initialFrame: initialFrame)
+      }
+      let filters = player.mpv.getString(MPVProperty.vf)
+      let graph = player.mpv.getString("lavfi-complex")
+      overlay.isPreparing = false
+      guard completion() else { cancelCropExitTransition(); return }
+      if image == nil {
+        cancelCropExitTransition()
+      } else if filters == player.mpv.getString(MPVProperty.vf), graph == player.mpv.getString("lavfi-complex") {
+        finishCropExitTransition()
+      }
+    }
+  }
+
+  func finishCropExitTransition() {
+    guard let overlay = cropExitOverlay, !overlay.isPreparing, !overlay.isFinishing else { return }
+    overlay.isFinishing = true
+    // Playback-restart reports the new frame; draw it before exposing the live surface.
+    Task { @MainActor [weak self, weak overlay] in
+      guard let self, let overlay else { return }
+      _ = await videoView.videoLayer.captureSnapshot()
+      guard cropExitOverlay === overlay else { return }
+      videoViewContainer.layoutSubtreeIfNeeded()
+      overlay.hasRenderedVideo = true
+      if overlay.animationComplete { cancelCropExitTransition(); return }
+      guard !overlay.hasStartedAnimation else { return }
+      let duration = player.disableWindowAnimation || Preference.bool(for: .disableAnimations)
+        ? 0 : AccessibilityPreferences.adjustedDuration(0.25)
+      startCropExitAnimation(to: overlay.bounds, duration: duration)
+    }
+  }
+
+  private func startCropExitAnimation(to frame: NSRect, duration: TimeInterval) {
+    guard let overlay = cropExitOverlay, !overlay.isPreparing, !overlay.hasStartedAnimation else { return }
+    overlay.hasStartedAnimation = true
+    overlay.finish(frame: frame, duration: duration) { [weak self, weak overlay] in
+      guard let self, let overlay, cropExitOverlay === overlay else { return }
+      overlay.animationComplete = true
+      if overlay.hasRenderedVideo { cancelCropExitTransition() }
+    }
+  }
+
+  func cancelCropExitTransition() {
+    cropExitOverlay?.removeFromSuperview()
+    cropExitOverlay = nil
   }
 
   /// File-local panscan lets stop/unload clean up an unfinished aspect transition.
@@ -2941,6 +3005,14 @@ class MainWindowController: PlayerWindowController {
       fsState.priorWindowedFrame = rect
     } else {
       log("Setting window frame to: \(rect)")
+      if let overlay = cropExitOverlay {
+        let target = NSRect(origin: .zero, size: NSSize(
+          width: overlay.bounds.width + rect.width - window.frame.width,
+          height: overlay.bounds.height + rect.height - window.frame.height))
+        let duration = player.disableWindowAnimation || Preference.bool(for: .disableAnimations)
+          ? 0 : AccessibilityPreferences.adjustedDuration(window.animationResizeTime(rect))
+        startCropExitAnimation(to: target, duration: duration)
+      }
       if player.disableWindowAnimation || Preference.bool(for: .disableAnimations) || !window.isVisible {
         window.setFrame(rect, display: true, animate: false)
       } else {

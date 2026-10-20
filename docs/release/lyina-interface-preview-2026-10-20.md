@@ -4,6 +4,16 @@ An experimental build for trying the player interface proposal independently of
 official IINA. This is not an official IINA release or an upstream-approved patch.
 The application reports LYINA 1.5.1 (180).
 
+## Crop-fix update
+
+The updated download corrects color corruption from odd-pixel exact crops on
+NV12/P010-style input. Crop exit now keeps the selected region visible across
+filter reconfiguration and coordinates its expansion with the window resize.
+Concurrent Live Text/frame capture and rendering shutdown are handled explicitly.
+See `docs/testing/2026-10-20-crop-color-exit.md` for local checks and their limits.
+The asset filenames remain stable so the existing proposal's download link
+receives the fixed build.
+
 ## Download and installation
 
 Download the Apple Silicon DMG from the
@@ -45,8 +55,11 @@ individual changes and smaller upstream patches.
 
 ## Source and reproducibility
 
-The release tag contains the application source, focused test harnesses, custom
-mpv patches, and this distribution note. See `other/patches/README.md` for the
+The original release tag identifies the initial preview snapshot. The updated
+asset's exact source commit is linked in the release notes and `BUILD-INFO.json`;
+the preview source branch advances without rewriting that published tag.
+The source contains the focused test harnesses, custom mpv patches and this
+distribution note. See `other/patches/README.md` for the
 engine baseline and build requirements. Do not build the engine from plain mpv
 without IINA's compatibility patches.
 

@@ -49,7 +49,8 @@ enum MPVOption {
  enum Miscellaneous { static let lavfiComplex = "lavfi-complex" }
 }
 enum MPVProperty { static let dwidth = "dwidth", dheight = "dheight", coreIdle = "core-idle" }
-enum NotificationFixture { case iinaAIDChanged }
+enum NotificationFixture { case iinaAIDChanged, iinaSIDChanged }
+enum AccessibilityPreferences { static func adjustedDuration(_ value: TimeInterval) -> TimeInterval { value } }
 enum OSDFixture { case track(TrackFixture, position: Int? = nil), custom(String) }
 struct Regex {
   static let aspect = Regex()
@@ -113,6 +114,11 @@ class TransitionVideoFixture {
  func displayActive() { active += 1 }; func displayIdle() { idle += 1 }
 }
 class CropWindowFixture {
+  var cropExitOverlay: NSView?
+  var cropAnimationTargets: [(NSRect, NSRect)] = []
+  func startCropExitAnimation(to frame: NSRect, duration: TimeInterval) {
+    cropAnimationTargets.append((frame, window!.frame))
+  }
   var window: NSWindow?
   var loaded = true
   var interactiveMode = InteractiveFixture()
@@ -485,5 +491,16 @@ controller.player.mpv.panscan = 0 // mpv automatically resets file-local options
 controller.beginVideoAspectTransition()
 controller.finishVideoAspectTransition()
 check(controller.player.mpv.panscan == 0, "a new-file cancellation cannot leak the prior file's saved fill")
+Preference.unlockWindowAspectRatio = false
+controller.fsState = .windowed
+window.setFrame(original, display: false)
+controller.cropExitOverlay = NSView(frame: NSRect(origin: .zero, size: original.size))
+controller.player.videoSizeForDisplay = (2902, 1421)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(controller.cropAnimationTargets.last?.1 == original,
+      "crop image expansion is scheduled before the native window resize")
+check(near(controller.cropAnimationTargets.last!.0.width, window.frame.width) &&
+      near(controller.cropAnimationTargets.last!.0.height, window.frame.height),
+      "crop image and window share the final bounds instead of two sequential zooms")
 window.close()
 print("Completed \(checks) native crop/rotation/aspect/track window checks.")

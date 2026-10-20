@@ -2643,6 +2643,7 @@ class PlayerCore: NSObject {
   /// - Important: The event may be received after IINA has started to stop and shutdown the core. The event must be ignored if
   ///         the player is no longer active.
   func fileStarted(path: String) {
+    mainWindow?.cancelCropExitTransition()
     guard info.state.active else { return }
     log("File started")
 
@@ -3002,6 +3003,7 @@ class PlayerCore: NSObject {
   }
 
   func playbackRestarted() {
+    mainWindow?.finishCropExitTransition()
     mainWindow?.finishVideoAspectTransition()
     log("Playback restarted")
 
