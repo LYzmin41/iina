@@ -41,8 +41,12 @@ final class LUTMPVFixture {
 final class LUTWindowFixture {
   struct Editor { var isActive = false }
   var interactiveMode = Editor()
+  var feedbackRequests = Set<UUID>()
+  func beginOperationFeedback() -> UUID { let id = UUID(); feedbackRequests.insert(id); return id }
+  func endOperationFeedback(_ id: UUID) { feedbackRequests.remove(id) }
 }
 final class PlayerCore {
+  @discardableResult func performSidebarChange<T>(_ action: () -> T) -> T { action() }
   static var playerCores: [PlayerCore] = []
   struct Preview { var originalTrack = VideoTrackProcessing(); var masterVF = "" }
   var scopedCropPreview: Preview?
@@ -53,7 +57,7 @@ final class PlayerCore {
     var trackSelectionGeneration = 0
   }
   var info = Info()
-  let mainWindow = LUTWindowFixture()
+  let mainWindow: LUTWindowFixture! = LUTWindowFixture()
   var mpv: LUTMPVFixture! = LUTMPVFixture()
   var scopedTrackSettings = TrackProcessingState()
   var videoGeometrySession: [URL: MediaVideoGeometryState] = [:]

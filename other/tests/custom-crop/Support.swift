@@ -85,12 +85,18 @@ struct CropTrackFixture {
   var id = 1; var title: String? = "Camera"
   func readableString() -> String { title ?? "" }
 }
+enum MPVProperty { static let videoOutParams = "video-out-params" }
 class PlayerFixture {
+  var isRefreshingPausedCrop = false
+  var canAnimateCropSource = true
+  private func beginPausedCropRefresh() {}
+  private func finishPausedCropRefresh() {}
   weak var mainWindow: MainWindowController!
-  enum State { case paused, playing }
+  enum State { case paused, playing, stopped; var active: Bool { self != .stopped } }
   enum OSD { case crop(String) }
   class Info {
     var state = State.paused
+    var trackSelectionGeneration = 1
     var unsureCrop = "None"
     var delogoFilter: MPVFilter?
     var cropFilter: MPVFilter?
@@ -112,8 +118,18 @@ class PlayerFixture {
     scopedCropPreview = nil
     return true
   }
-  func postNotification(_ name: Notification.Name) {}
+  var publishedCropDescriptions: [String] = []
+  func postNotification(_ name: Notification.Name) {
+    if name == .iinaTrackSettingsChanged { publishedCropDescriptions.append(info.unsureCrop) }
+  }
   let info = Info()
+  final class Engine {
+    var size = NSSize(width: 960, height: 540)
+    func getInt(_ property: String) -> Int { Int(property.hasSuffix("/w") ? size.width : size.height) }
+  }
+  let mpv = Engine()
+  var videoSizeForDisplay: (Int, Int) { (Int(mpv.size.width), Int(mpv.size.height)) }
+
   var originalVideoSize = (960, 540)
   var displaySizeOverride: NSSize?
   var rotation = 0
@@ -150,14 +166,43 @@ class LiveTextFixture {
   func requestAnalysis() { requests += 1 }
 }
 class MainWindowController {
-  var isCropExitInProgress = false
-  func prepareCropExit(selection: NSRect, sourceSize: NSSize, initialFrame: NSRect, completion: @escaping () -> Bool) {
+  var cropExitOverlay: CropTransitionOverlay?
+  // PRODUCTION_DEFER_CROP_RESTORATION
+  private var forcedCropTransition = false
+  var isCropTransitionInProgress: Bool {
+    get { forcedCropTransition || interactiveMode.isEntering }
+    set { forcedCropTransition = newValue }
+  }
+  func cancelCropExitTransition() {
+    forcedCropTransition = false
+    interactiveMode.cancelEntryTransition()
+    interactiveMode.restoreExitPresentation()
+  }
+  var entryDuration: TimeInterval = 0
+  func cropTransitionDuration(_ duration: TimeInterval) -> TimeInterval { entryDuration }
+  func finishPendingNativeCropFrame(_ overlay: CropTransitionOverlay) {}
+  func afterNativeCropFrame(_ overlay: CropTransitionOverlay, preparing: Bool = false,
+                            outputIsReady: Bool = false, completion: @escaping () -> Void) {
+    DispatchQueue.main.async(execute: completion)
+  }
+  func bindCropVideo(_ overlay: CropTransitionOverlay, pixelSize: NSSize) {
+    overlay.useNativeVideo(videoView, in: videoViewContainer, pixelSize: pixelSize)
+  }
+
+  var exitPreparationObserver: ((NSRect, NSRect, NSRect, NSRect, NSImage?) -> Void)?
+  func prepareCropExit(selection: NSRect, sourceSize: NSSize, initialFrame: NSRect,
+                       initialClip: NSRect, initialSelection: NSRect,
+                       controlsImage: NSImage?, controlsFrame: NSRect,
+                       completion: @escaping () -> Bool) {
+    exitPreparationObserver?(initialFrame, initialClip, initialSelection, controlsFrame, controlsImage)
     _ = completion()
   }
   struct FloatingOSCFixture { func cancelPositionAnimation() {} }
   let oscFloatingView = FloatingOSCFixture()
   let player = PlayerFixture()
   var window: NSWindow?
+  var preparedWindowReferences = 0
+  func prepareVideoTransformWindowReference() { preparedWindowReferences += 1 }
   var cropGeometryRefreshes = 0
   func handleVideoSizeChange(keepWindowSize: Bool) { cropGeometryRefreshes += 1 }
   let videoViewContainer = NSView()
@@ -206,4 +251,24 @@ class WheelEvent: NSEvent {
   override var momentumPhase: Phase { inertia }
   override var timestamp: TimeInterval { time }
   override var locationInWindow: NSPoint { point }
+}
+
+final class CropRenderFixture {
+  var isInCropTransition = false
+  func cancelCropFrameRequests() {}
+  var isPreparingCropFrame = false
+  func setCropFramePreparation(_ preparing: Bool) { isPreparingCropFrame = preparing }
+  func withCropFrameUpdate(_ body: () -> Void) { body() }
+  var didPublishHandoff: (() -> Void)?
+  func withCropFrameHandoff(_ body: () -> Void) {
+    body()
+    isPreparingCropFrame = false
+    didPublishHandoff?()
+  }
+  func displayForCropHandoff(allowCachedFrame: Bool = false) {}
+  var isAnimatingWindowResize = false
+}
+
+extension PlayerFixture {
+  func cropTransitionFrame(in bounds: NSRect) -> CropTransitionOverlay.PlayerFrame? { nil }
 }

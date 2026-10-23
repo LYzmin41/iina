@@ -66,6 +66,7 @@ protocol HeaderInsets {
   func setTrailingConstraint(_ value: CGFloat, animated: Bool)
 }
 class MainWindowController: NSObject {
+  var isCropTransitionInProgress = false
   enum UIAnimationState { case hidden, shown, willShow, willHide }
   var window: NSWindow?
   var interactiveMode = InteractiveMode()
@@ -121,6 +122,7 @@ class MainWindowController: NSObject {
   private var isPluginMenuTracking = false
   var hideControlTimer: Timer?
   let fadeableViews = FadeableViewController()
+  var isFullscreenTransitionInProgress = false
   enum FullscreenState { case windowed, fullscreen; var isFullscreen: Bool { self == .fullscreen } }
   var fsState = FullscreenState.windowed
   enum OSCPosition { case floating, top, bottom }

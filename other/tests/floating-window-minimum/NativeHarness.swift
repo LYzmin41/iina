@@ -56,6 +56,9 @@ final class MinimumWindowHarness {
   var interactiveMode = InteractiveMode()
   var loaded = true
   var windowResizeSession: WindowResizeSession?
+  var isCropTransitionInProgress = false
+  var isApplyingVideoTransformWindowFrame = false
+  var isFullscreenTransitionInProgress = false
   let liveText = LiveTextStub()
   let player = PlayerStub()
   var cachedGeometry: GeometryDef?
@@ -65,6 +68,7 @@ final class MinimumWindowHarness {
   private func invalidateFloatingOSCLayout() {}
 
   // Only Smaller/Bigger menu commands are in this harness's behavioral scope.
+  func setUserWindowFrame(_ frame: NSRect) { window!.setFrame(frame, display: true) }
   func setWindowScale(_ scale: Double) { fatalError("Unexpected fixed-scale menu command: \(scale)") }
 
 var titleBarView: TitlebarFixture?
@@ -234,7 +238,7 @@ var titleBarView: TitlebarFixture?
     }
     cachedGeometry = GeometryDef.parse("100x900")
     let both = windowFrameFromGeometry(newSize: NSSize(width: 1920, height: 1080), screen: screen)!
-    check(both.height < 900 && both.width >= floatingMinimum.width && both.height >= floatingMinimum.height, "both-axis geometry retains width priority while satisfying height minimum")
+    check(both.height == 900 && both.width == floatingMinimum.width, "both explicit axes are respected while enforcing the minimum width")
     Preference.unlockWindowAspectRatio = true
     cachedGeometry = GeometryDef.parse("600x900+50%-50%")
     let free = windowFrameFromGeometry(newSize: NSSize(width: 1920, height: 1080), screen: screen)!

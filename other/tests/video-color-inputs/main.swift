@@ -23,10 +23,11 @@ check(inputs[1].integerValue == -33 && player.profiles[0]!.contrast == -33, "sli
 submit(2, "999")
 submit(3, "-999")
 check(player.profiles[0]!.saturation == 100 && player.profiles[0]!.gamma == -100 && inputs[2].integerValue == 100 && inputs[3].integerValue == -100, "out-of-range values clamp at the engine limits")
-let writesBeforeInvalid = player.writes.count
 submit(4, "")
+check(player.profiles[0]!.hue == 0 && inputs[4].integerValue == 0, "empty color input resets its parameter to zero")
+let writesBeforeInvalid = player.writes.count
 submit(4, "wrong")
-check(player.writes.count == writesBeforeInvalid && inputs[4].integerValue == 17, "empty or invalid input restores the current value without writing")
+check(player.writes.count == writesBeforeInvalid && inputs[4].integerValue == 0, "invalid nonempty input restores the current value without writing")
 let output = player.profiles[0]!
 player.scopedTrackSettings.id = 1; player.post(.iinaTrackSettingsChanged)
 check(inputs[0].integerValue == -31 && sliders[0].integerValue == -31, "Configure refreshes both controls from the selected source")
@@ -48,7 +49,7 @@ view.topAnchor.constraint(equalTo: host.topAnchor).isActive = true
 let width = view.widthAnchor.constraint(equalToConstant: 320); width.isActive = true
 for size in [320.0, 400.0] {
   width.constant = size; host.layoutSubtreeIfNeeded()
-  check(sliders.allSatisfy { $0.frame.width > 80 } && inputs.allSatisfy { abs($0.superview!.frame.width - 50) < 0.1 }, "slider and fixed-width fields fit sidebar width \(size)")
+  check(sliders.allSatisfy { $0.frame.width > 80 } && inputs.allSatisfy { abs($0.frame.width - 50) < 0.1 && $0.isBezeled }, "slider and native fixed-width fields fit sidebar width \(size)")
 }
 let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 400, height: 500), styleMask: [.titled], backing: .buffered, defer: false)
 window.isReleasedWhenClosed = false; window.contentView = host
@@ -57,6 +58,10 @@ if let editor = inputs[0].currentEditor() {
   editor.string = "63"
   window.makeFirstResponder(inputs[1])
   check(player.profiles[1]!.brightness == 63 && sliders[0].integerValue == 63, "native focus loss commits the typed value")
+  window.makeFirstResponder(inputs[0])
+  inputs[0].currentEditor()?.string = ""
+  window.makeFirstResponder(inputs[1])
+  check(player.profiles[1]!.brightness == 0 && inputs[0].integerValue == 0, "empty formatted color input resets on native focus loss")
   window.makeFirstResponder(inputs[0])
   inputs[0].currentEditor()?.string = "77"
   player.profiles[1]!.brightness = 0; player.post(.iinaTrackSettingsChanged)

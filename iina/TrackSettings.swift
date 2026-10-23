@@ -341,12 +341,12 @@ final class TrackSettingsGroupReset: SidebarResetButton {
   @objc private func resetAllTracks() {
     guard isEnabled else { return }
     window?.makeFirstResponder(nil)
-    player.resetTrackSettings(group, allTracks: true)
+    player.performSidebarChange { player.resetTrackSettings(group, allTracks: true) }
   }
   @objc private func resetGroup() {
     guard isEnabled else { return }
     window?.makeFirstResponder(nil)
-    player.resetTrackSettings(group)
+    player.performSidebarChange { player.resetTrackSettings(group) }
   }
 }
 
@@ -399,6 +399,7 @@ extension PlayerCore {
     let id = scopedTrackSettings.target(group)
     guard !mainWindow.interactiveMode.isActive else { postNotification(.iinaTrackSettingsChanged); return false }
     guard id > 0, info.videoTracks.contains(where: { $0.id == id }) else { return false }
+    mainWindow.prepareVideoTransformWindowReference()
     let old = scopedTrackSettings
     var value = scopedTrackSettings.video[id] ?? VideoTrackProcessing()
     change(&value); scopedTrackSettings.video[id] = value
@@ -503,6 +504,7 @@ struct ScopedTrackCropPreview {
 
 extension PlayerCore {
   func openScopedCustomCrop() {
+    mainWindow.prepareVideoTransformWindowReference()
     let id = scopedTrackSettings.target(.videoGeometry)
     guard id != 0 else { mainWindow.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true); return }
     guard !mainWindow.interactiveMode.isActive, scopedCropPreview == nil,
@@ -540,7 +542,7 @@ extension PlayerCore {
     let previous = scopedTrackSettings.video[preview.id]
     if applying {
       var profile = scopedTrackSettings.video[preview.id] ?? preview.originalTrack; profile.crop = crop
-      profile.cropDescription = crop == nil ? "None" : ""
+      profile.cropDescription = crop == nil ? "None" : "Custom"
       scopedTrackSettings.video[preview.id] = profile
     }
     mpv.setString(MPVOption.Video.videoAspectOverride, preview.masterAspect)

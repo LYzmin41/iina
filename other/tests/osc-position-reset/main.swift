@@ -17,7 +17,14 @@ let controller = MainWindowController()
 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600),
                       styleMask: [.borderless], backing: .buffered, defer: false)
 window.isReleasedWhenClosed = false
-let video = EventSinkView(frame: NSRect(x: 0, y: 0, width: 1000, height: 600))
+final class LayoutCountingContentView: EventSinkView {
+  var layoutRequests = 0
+  override func layoutSubtreeIfNeeded() {
+    layoutRequests += 1
+    super.layoutSubtreeIfNeeded()
+  }
+}
+let video = LayoutCountingContentView(frame: NSRect(x: 0, y: 0, width: 1000, height: 600))
 window.contentView = video
 controller.window = window
 controller.videoViewContainer = video
@@ -77,6 +84,82 @@ func resize(_ size: NSSize) {
   header.frame = NSRect(x: 0, y: size.height - 40, width: size.width, height: 40)
   position()
 }
+func hasPendingLayout(_ view: NSView) -> Bool {
+  view.needsLayout || view.needsUpdateConstraints || view.subviews.contains { hasPendingLayout($0) }
+}
+func setNativeFrame(_ requestedSize: NSSize) -> NSSize {
+  window.setFrame(NSRect(origin: window.frame.origin, size: requestedSize), display: true)
+  let actual = video.bounds.size
+  header.frame = NSRect(x: 0, y: actual.height - 40, width: actual.width, height: 40)
+  return actual
+}
+func invalidateCompletionControls() {
+  // MainWindowController invalidates its floating controls before the final
+  // normal position update. This fixture replaces those controls with this row.
+  osc.oscTopView.needsUpdateConstraints = true
+  osc.oscTopView.needsLayout = true
+}
+func checkRoundedPreparedResize(_ requested: NSSize) {
+  // Use actual NSWindow rounding, without assigning a fractional content frame.
+  resize(NSSize(width: 1000, height: 600))
+  let expectedSize = setNativeFrame(requested)
+  invalidateCompletionControls()
+  position()
+  let firstImmediate = osc.frame
+  invalidateCompletionControls()
+  position()
+  // A repeated ordinary update can round an anchored row's height by one
+  // backing pixel even without preparation; use the settled normal reference.
+  check(abs(osc.frame.minX - firstImmediate.minX) <= 0.51 &&
+        abs(osc.frame.minY - firstImmediate.minY) <= 0.51 &&
+        abs(osc.frame.width - firstImmediate.width) <= 0.51 &&
+        abs(osc.frame.height - firstImmediate.height) <= 0.51,
+        "ordinary native position updates converge within one backing pixel at unchanged actual size")
+  let immediate = osc.frame
+  let immediateScale = controller.floatingOSCScale
+  let intent = osc.currentPosition
+
+  resize(NSSize(width: 1000, height: 600))
+  osc.prepareForResize(to: requested)
+  let preparedScale = controller.floatingOSCScale
+  let actual = setNativeFrame(requested)
+  video.layoutSubtreeIfNeeded()
+  check(actual == expectedSize && abs(actual.width - requested.width) <= 1 &&
+        abs(actual.height - requested.height) <= 1 && actual != requested,
+        "native window applies the verified one-point rounding bound to fractional resize")
+  check(!video.needsLayout && !video.needsUpdateConstraints && !hasPendingLayout(osc),
+        "prepared native window layout has actually cleared parent and OSC descendant dirty flags")
+  let expectedPlacement = FloatingOSCPlacement.frame(position: intent!, size: osc.frame.size,
+    contentSize: actual, titlebarBottom: header.frame.minY + 1)
+  let measuredRequests = video.layoutRequests
+  osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+  check(video.layoutRequests == measuredRequests && controller.floatingOSCScale == preparedScale &&
+        !hasPendingLayout(osc),
+        "rounded prepared placement reuses measured metrics without redirtying controls or premeasuring")
+  check(near(xConstraint.constant, expectedPlacement.midX) && near(yConstraint.constant, expectedPlacement.minY),
+        "rounded prepared placement uses actual measured panel dimensions and content bounds for unit and edge clamping")
+  video.layoutSubtreeIfNeeded()
+  check(abs(osc.frame.minX - immediate.minX) <= 1.01 && abs(osc.frame.minY - immediate.minY) <= 1.01 &&
+        abs(osc.frame.width - immediate.width) <= 1.01 && abs(osc.frame.height - immediate.height) <= 1.01 &&
+        osc.currentPosition == intent,
+        "rounded prepared placement stays within one native point of immediate geometry and preserves intent")
+  invalidateCompletionControls()
+  position()
+  let preferredWidth = osc.constraints.first {
+    $0.firstAttribute == .width && $0.secondItem == nil && $0.priority.rawValue == 300
+  }!
+  check(controller.floatingOSCScale == immediateScale &&
+        preferredWidth.constant == FloatingOSCMetrics.preferredWidth * immediateScale &&
+        controller.topRowHeight!.constant == 45 * immediateScale &&
+        controller.bottomRowHeight!.constant == 35 * immediateScale && osc.currentPosition == intent &&
+        osc.frame == immediate,
+        "normal completion restores exact actual-size metrics and settled immediate native geometry")
+  let consumedRequests = video.layoutRequests
+  osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+  check(video.layoutRequests > consumedRequests,
+        "a consumed preparation cannot suppress measurement on a later placement attempt")
+  video.layoutSubtreeIfNeeded()
+}
 let sizes = [NSSize(width: 1000, height: 600), NSSize(width: 400, height: 225),
              NSSize(width: 1512, height: 982), NSSize(width: 1920, height: 1080),
              NSSize(width: 2560, height: 1080), NSSize(width: 800, height: 800)]
@@ -92,6 +175,144 @@ for size in sizes {
   check(abs(osc.frame.minY - 16) <= 0.51 && abs(osc.frame.midX - size.width / 2) <= 0.51,
         "untouched initial position stays centered sixteen points above bottom through resize")
 }
+// The crop tick owns the final layout, while the OSC still measures its new
+// native dimensions before computing placement. Compare with immediate layout
+// across changing scales, constant-scale minimum widths and portrait content.
+for size in [NSSize(width: 900, height: 500), NSSize(width: 450, height: 250),
+             NSSize(width: 420, height: 225), NSSize(width: 400, height: 225),
+             NSSize(width: 405, height: 225), NSSize(width: 600, height: 400),
+             NSSize(width: 400, height: 800)] {
+  resize(size)
+  let immediate = osc.frame
+  let immediateScale = controller.floatingOSCScale
+  let intent = osc.currentPosition
+  resize(NSSize(width: 1000, height: 600))
+  window.setContentSize(size)
+  video.frame.size = size
+  header.frame = NSRect(x: 0, y: size.height - 40, width: size.width, height: 40)
+  osc.updatePosition(deferringFinalLayout: true)
+  check(video.needsLayout, "crop placement leaves its final layout to the owning geometry tick")
+  video.layoutSubtreeIfNeeded()
+  check(abs(osc.frame.minX - immediate.minX) <= 0.51 && abs(osc.frame.minY - immediate.minY) <= 0.51 &&
+        abs(osc.frame.width - immediate.width) <= 0.51 && abs(osc.frame.height - immediate.height) <= 0.51,
+        "batched crop placement matches immediate native OSC geometry")
+  check(controller.floatingOSCScale == immediateScale && osc.currentPosition == intent,
+        "batched crop placement preserves adaptive scale and placement intent")
+
+  resize(NSSize(width: 1000, height: 600))
+  osc.prepareForResize(to: size)
+  window.setContentSize(size)
+  video.frame.size = size
+  header.frame = NSRect(x: 0, y: size.height - 40, width: size.width, height: 40)
+  // Represent the layout performed by AppKit during setFrame(display: true).
+  video.layoutSubtreeIfNeeded()
+  let measuredRequests = video.layoutRequests
+  osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+  check(video.layoutRequests == measuredRequests,
+        "prepared resize reuses settled native dimensions without another whole-content measurement")
+  video.layoutSubtreeIfNeeded()
+  check(abs(osc.frame.minX - immediate.minX) <= 0.51 && abs(osc.frame.minY - immediate.minY) <= 0.51 &&
+        abs(osc.frame.width - immediate.width) <= 0.51 && abs(osc.frame.height - immediate.height) <= 0.51 &&
+        controller.floatingOSCScale == immediateScale && osc.currentPosition == intent,
+        "prepared minimum, scale-floor and portrait resize matches immediate native geometry and placement")
+
+  // Unchanged metrics cannot suppress a genuinely dirty anchored child.
+  osc.oscTopView.needsLayout = true
+  let dirtyRequests = video.layoutRequests
+  osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+  check(video.layoutRequests > dirtyRequests,
+        "prepared resize still measures dirty anchored controls at unchanged scale")
+  video.layoutSubtreeIfNeeded()
+
+  // AppKit may constrain a proposed frame to a different actual content size.
+  osc.prepareForResize(to: immediateScale == FloatingOSCScale.minimum
+    ? NSSize(width: 1500, height: 1000) : NSSize(width: 400, height: 225))
+  let correctedRequests = video.layoutRequests
+  osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+  check(video.layoutRequests > correctedRequests && controller.floatingOSCScale == immediateScale,
+        "actual size metrics override an incorrect prediction before measuring placement")
+  video.layoutSubtreeIfNeeded()
+}
+var preparedStyles: [TranslucentView.Style] = [.visualEffect]
+if #available(macOS 26, *) { preparedStyles.append(.liquidGlass) }
+for style in preparedStyles {
+  osc.setStyle(style)
+  for compact in [false, true] {
+    Preference.set(compact, for: .compactUI)
+    for requested in [NSSize(width: 774.1865, height: 435.4803),
+                      NSSize(width: 721.1285, height: 407.1865),
+                      NSSize(width: 400.1865, height: 225.4803),
+                      NSSize(width: 400.1865, height: 800.4803)] {
+      checkRoundedPreparedResize(requested)
+    }
+  }
+}
+Preference.set(false, for: .compactUI)
+resize(NSSize(width: 775, height: 436))
+func prepareSettledMetrics(_ predicted: NSSize = NSSize(width: 774.1865, height: 435.4803)) {
+  osc.prepareForResize(to: predicted)
+  video.layoutSubtreeIfNeeded()
+}
+// These fallbacks start with a real, otherwise reusable preparation.
+prepareSettledMetrics()
+osc.oscTopView.needsLayout = true
+let dirtyPreparedRequests = video.layoutRequests
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+check(video.layoutRequests > dirtyPreparedRequests &&
+      controller.floatingOSCScale == FloatingOSCScale.factor(for: video.bounds.size),
+      "dirty OSC child forces exact metrics and measurement even with a matching prepared token")
+video.layoutSubtreeIfNeeded()
+prepareSettledMetrics()
+let parentWidth = osc.widthAnchor.constraint(equalTo: video.widthAnchor, multiplier: 0.4)
+parentWidth.priority = .init(500)
+parentWidth.isActive = true
+video.needsUpdateConstraints = true
+let parentPreparedRequests = video.layoutRequests
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+check(video.layoutRequests > parentPreparedRequests && abs(osc.frame.width - video.bounds.width * 0.4) <= 0.51,
+      "dirty parent constraints force measurement of the actually assigned panel width")
+parentWidth.isActive = false
+position()
+prepareSettledMetrics()
+osc.setStyle(osc.style, force: true)
+video.layoutSubtreeIfNeeded()
+let rebuiltStyleRequests = video.layoutRequests
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+check(video.layoutRequests > rebuiltStyleRequests,
+      "a rebuilt native wrapper invalidates preparation even when its style and dirty flags match")
+video.layoutSubtreeIfNeeded()
+prepareSettledMetrics()
+Preference.set(true, for: .compactUI)
+let compactPreparedRequests = video.layoutRequests
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+check(video.layoutRequests > compactPreparedRequests,
+      "changed compact inputs invalidate prepared metrics before measuring native placement")
+video.layoutSubtreeIfNeeded()
+Preference.set(false, for: .compactUI)
+position()
+prepareSettledMetrics()
+position()
+let normalConsumedRequests = video.layoutRequests
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+check(video.layoutRequests > normalConsumedRequests,
+      "a normal update consumes an unused preparation before a later owned resize attempt")
+video.layoutSubtreeIfNeeded()
+prepareSettledMetrics()
+osc.isDragging = true
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+osc.isDragging = false
+let guardedConsumedRequests = video.layoutRequests
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+check(video.layoutRequests > guardedConsumedRequests,
+      "a guarded placement attempt consumes preparation instead of leaking it into a later update")
+video.layoutSubtreeIfNeeded()
+prepareSettledMetrics(NSSize(width: 773.9, height: 435.4803))
+let outsideBoundRequests = video.layoutRequests
+osc.updatePosition(deferringFinalLayout: true, afterPreparedResize: true)
+check(video.layoutRequests > outsideBoundRequests &&
+      controller.floatingOSCScale == FloatingOSCScale.factor(for: video.bounds.size),
+      "a prediction outside the one-point bound falls back to exact actual metrics and measurement")
+video.layoutSubtreeIfNeeded()
 Preference.set(false, for: .controlBarDefaultPositionIsCustomized)
 osc.mouseDown(with: event(.leftMouseDown, point: backgroundPoint()))
 check(near(yConstraint.constant, 16), "reset to untouched default retains fixed sixteen-point gap")
@@ -147,6 +368,7 @@ for hUnit in [FloatingOSCPosition.Unit.percent, .point] {
         Preference.saveFloatingOSCDefaultPosition(intent)
         resize(NSSize(width: 1000, height: 600))
         osc.mouseDown(with: event(.leftMouseDown, point: backgroundPoint()))
+        checkRoundedPreparedResize(NSSize(width: 774.1865, height: 435.4803))
         for size in sizes {
           resize(size)
           let expected = FloatingOSCPlacement.frame(position: intent, size: osc.frame.size, contentSize: size, titlebarBottom: header.frame.minY + 1)

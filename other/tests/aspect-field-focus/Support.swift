@@ -15,19 +15,21 @@ extension Notification.Name {
 }
 enum TestOSD { case aspect(String) }
 class PlayerCore {
+  @discardableResult func performSidebarChange<T>(_ action: () -> T) -> T { action() }
   struct Info {
     struct State { var active = true }
     var state = State()
     var unsureAspect = "Default"
   }
   var info = Info()
+  var aspectWrites: [String] = []
   struct Window { struct Editor { var isActive = false }; var interactiveMode = Editor() }
   var mainWindow = Window()
   struct VideoSettings { var aspect = "Default" }
   func scopedVideoSettings() -> VideoSettings { VideoSettings(aspect: info.unsureAspect) }
   func setScopedVideoAspect(_ value: String) { setVideoAspect(value) }
   func observe(_ name: Notification.Name, _ callback: @escaping (Notification) -> Void) {}
-  func setVideoAspect(_ value: String) {}
+  func setVideoAspect(_ value: String) { info.unsureAspect = value; aspectWrites.append(value) }
   func sendOSD(_ osd: TestOSD) {}
 }
 class HorizontalScrollViewWithIndicator: NSView {

@@ -150,8 +150,10 @@ class SidebarVideoPane: SidebarScrollView {
   }
 
   @objc private func hdrAction(_ sender: NSSwitch) {
-    self.player.info.hdrEnabled = sender.state == .on
-    self.player.refreshEdrMode()
+    player.performSidebarChange {
+      player.info.hdrEnabled = sender.state == .on
+      player.refreshEdrMode()
+    }
   }
 }
 
@@ -165,6 +167,7 @@ fileprivate class HorizontalScrollViewWithIndicator: NSView {
   private var indicator: NSButton!
   private var indicatorDirection: IndicatorDirection = .trailing {
     didSet {
+      guard indicatorDirection != oldValue else { return }
       switch indicatorDirection {
       case .hidden:
         indicator.isHidden = true
@@ -305,7 +308,6 @@ fileprivate class AspectRatioView: HorizontalScrollViewWithIndicator {
   private unowned let player: PlayerCore
   private var segmentControl: NSSegmentedControl!
   private var input: NSTextField!
-  private var inputFocusMonitor: Any?
 
   init(player: PlayerCore) {
     self.player = player
@@ -318,9 +320,9 @@ fileprivate class AspectRatioView: HorizontalScrollViewWithIndicator {
     )
     segmentControl.selectedSegment = 0
 
-    self.input = NSTextField()
-    input.usesSingleLineMode = true
-    input.focusRingType = .exterior
+    let input = SidebarInputField()
+    input.emptyValue = ""
+    self.input = input
     input.size(width: 40, height: 24)
     input.target = self
     input.action = #selector(aspectRatioAction)
@@ -340,31 +342,6 @@ fileprivate class AspectRatioView: HorizontalScrollViewWithIndicator {
     fatalError("init(coder:) has not been implemented")
   }
 
-  override func viewDidMoveToWindow() {
-    super.viewDidMoveToWindow()
-    if let inputFocusMonitor {
-      NSEvent.removeMonitor(inputFocusMonitor)
-      self.inputFocusMonitor = nil
-    }
-    guard window != nil else { return }
-    // Background clicks do not transfer focus, so end editing before dispatch.
-    inputFocusMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-      self?.dismissInputFocus(for: event)
-      return event
-    }
-  }
-
-  private func dismissInputFocus(for event: NSEvent) {
-    guard let window, event.window === window, input.currentEditor() != nil else { return }
-    let point = input.convert(event.locationInWindow, from: nil)
-    guard !input.bounds.contains(point) else { return }
-    window.makeFirstResponder(nil)
-  }
-
-  deinit {
-    if let inputFocusMonitor { NSEvent.removeMonitor(inputFocusMonitor) }
-  }
-
   private func update() {
     guard player.info.state.active else { return }
     segmentControl.isEnabled = !player.mainWindow.interactiveMode.isActive
@@ -379,16 +356,19 @@ fileprivate class AspectRatioView: HorizontalScrollViewWithIndicator {
 
   @objc private func aspectRatioAction(_ sender: AnyObject) {
     if let textField = sender as? NSTextField {
-      let value = textField.stringValue
-      if value != "" {
-        segmentControl.setSelected(false, forSegment: segmentControl.selectedSegment)
-        player.setScopedVideoAspect(value)
-        player.sendOSD(.aspect(value))
+      let value = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      let aspect = value.isEmpty ? AppData.aspectsInPanel[0] : value
+      segmentControl.selectedSegment = value.isEmpty ? 0 : -1
+      player.performSidebarChange {
+        player.setScopedVideoAspect(aspect)
+        player.sendOSD(.aspect(aspect))
       }
     } else if let segment = sender as? NSSegmentedControl {
       let aspect = AppData.aspectsInPanel[segment.selectedSegment]
-      player.setScopedVideoAspect(aspect)
-      player.sendOSD(.aspect(aspect))
+      player.performSidebarChange {
+        player.setScopedVideoAspect(aspect)
+        player.sendOSD(.aspect(aspect))
+      }
     }
   }
 }
@@ -416,6 +396,7 @@ fileprivate class CropView: HorizontalScrollViewWithIndicator {
     player.observe(.iinaVideoParamsChanged) { [unowned self] _ in
       update()
     }
+    update()
   }
 
   required init?(coder: NSCoder) {
@@ -446,8 +427,10 @@ fileprivate class CropView: HorizontalScrollViewWithIndicator {
       }
     } else {
       let cropStr = AppData.cropsInPanel[segmentControl.selectedSegment]
-      player.setScopedCrop(cropStr)
-      player.sendOSD(.crop(cropStr))
+      player.performSidebarChange {
+        player.setScopedCrop(cropStr)
+        player.sendOSD(.crop(cropStr))
+      }
     }
   }
 }
@@ -496,8 +479,10 @@ fileprivate class RotationView: NSView {
 
   @objc private func rotationAction(_ sender: AnyObject) {
     let value = AppData.rotations[segmentControl.selectedSegment]
-    player.setScopedVideoRotate(value)
-    player.sendOSD(.rotate(value))
+    player.performSidebarChange {
+      player.setScopedVideoRotate(value)
+      player.sendOSD(.rotate(value))
+    }
   }
 }
 
@@ -530,7 +515,7 @@ fileprivate class HwdecSwitch: NSSwitch {
   }
 
   @objc private func hwdecAction(_ sender: AnyObject) {
-    player.toggleHardwareDecoding(state == .on)
+    player.performSidebarChange { player.toggleHardwareDecoding(state == .on) }
   }
 }
 
@@ -575,6 +560,7 @@ fileprivate class SpeedView: SidebarSliderView {
       slider.neutralValue = 8
     }
     input.formatter = speedFormatter
+    input.emptyValue = "1"
   }
 
   /// Return the slider value that represents the given playback speed.
@@ -640,16 +626,13 @@ fileprivate class SpeedView: SidebarSliderView {
     /// Unfortunately, the text field has not applied validation/formatting to the number at this point.
     /// We will do that manually via `constrainSpeed`.
     updateSpeed(to: input.doubleValue)
-    if let window = input.window {
-      window.makeFirstResponder(window.contentView)
-    }
   }
 
   override func resetButtonAction() {
     player.setSpeed(1.0)
   }
 
-  @objc func resetSpeed() { resetButtonAction() }
+  @objc func resetSpeed() { player.performSidebarChange { resetButtonAction() } }
 }
 
 
@@ -817,11 +800,13 @@ final class VideoLUTPopUp: NSPopUpButton, NSMenuDelegate {
     let previousValue = currentLUTValue()
     Utility.quickOpenPanel(title: NSLocalizedString("lut.import", comment: "Import LUT"), chooseDir: false,
                           sheetWindow: window, allowedFileTypes: ["cube"]) { [weak self] url in
-      guard let self, self.player.info.currentURL == media,
+      guard let self, let mainWindow = self.player.mainWindow, self.player.info.currentURL == media,
             self.player.info.trackSelectionGeneration == generation else { return }
+      let feedback = mainWindow.beginOperationFeedback()
       Self.importQueue.async { [weak self] in
         let prepared = autoreleasepool { Result { try VideoLUTLibrary.prepareImport(url) } }
         DispatchQueue.main.async { [weak self] in
+          mainWindow.endOperationFeedback(feedback)
           guard let self else { return }
           let sameMedia = {
             self.player.info.currentURL == media
@@ -853,7 +838,9 @@ final class VideoLUTPopUp: NSPopUpButton, NSMenuDelegate {
       return
     }
     if player.scopedTrackSettings.target(.videoColor) > 0 {
-      _ = player.updateScopedVideo(.videoColor) { $0.lutPath = path }
+      player.performSidebarChange {
+        _ = player.updateScopedVideo(.videoColor) { $0.lutPath = path }
+      }
       return
     }
     let existing = player.mpv.getFilters(MPVProperty.vf).first(where: { $0.label == VideoLUTLibrary.filterLabel })
@@ -865,10 +852,15 @@ final class VideoLUTPopUp: NSPopUpButton, NSMenuDelegate {
       // mpv measures fixed-length quoting in UTF-8 bytes, including filenames.
       let filter = MPVFilter(name: "lavfi", label: VideoLUTLibrary.filterLabel,
                             paramString: "graph=%\(graph.utf8.count)%\(graph)")
-      success = player.addVideoFilter(filter)
-      if !success { player.mpv.setString(MPVProperty.vf, previous) }
+      success = player.performSidebarChange {
+        let applied = player.addVideoFilter(filter)
+        if !applied { player.mpv.setString(MPVProperty.vf, previous) }
+        return applied
+      }
     } else {
-      success = existing == nil || player.removeVideoFilter("@" + VideoLUTLibrary.filterLabel)
+      success = existing == nil || player.performSidebarChange {
+        player.removeVideoFilter("@" + VideoLUTLibrary.filterLabel)
+      }
     }
     if !success { Utility.showAlert("lut_apply_failed", sheetWindow: window) }
   }
@@ -899,10 +891,14 @@ enum VideoLUTLibraryActions {
           core.scopedTrackSettings.video[id]?.lutPath = nil
           changed = true
         }
-        if changed && core.info.state.loaded && !core.refreshTrackProcessing(.video) { throw CocoaError(.userCancelled) }
+        if changed && core.info.state.loaded && !core.performSidebarChange({ core.refreshTrackProcessing(.video) }) {
+          throw CocoaError(.userCancelled)
+        }
         if core.mpv.getFilters(MPVProperty.vf).contains(where: {
           $0.label == VideoLUTLibrary.filterLabel && $0.params?["graph"] == entry.graph
-        }), !core.removeVideoFilter("@" + VideoLUTLibrary.filterLabel) { throw CocoaError(.userCancelled) }
+        }), !core.performSidebarChange({ core.removeVideoFilter("@" + VideoLUTLibrary.filterLabel) }) {
+          throw CocoaError(.userCancelled)
+        }
       }
       restoreSessions = PlayerCore.playerCores.map { $0.detachSavedVideoLUT(atPath: entry.url.path) }
       try library.remove(entry)
@@ -910,8 +906,10 @@ enum VideoLUTLibraryActions {
       restoreSessions.forEach { $0() }
       for snapshot in snapshots {
         snapshot.core.scopedTrackSettings = snapshot.settings
-        if snapshot.core.info.state.loaded { _ = snapshot.core.refreshTrackProcessing(.video) }
-        snapshot.core.mpv.setString(MPVProperty.vf, snapshot.filters)
+        snapshot.core.performSidebarChange {
+          if snapshot.core.info.state.loaded { _ = snapshot.core.refreshTrackProcessing(.video) }
+          snapshot.core.mpv.setString(MPVProperty.vf, snapshot.filters)
+        }
       }
       Utility.showAlert("lut_remove_failed", sheetWindow: window)
       return false
@@ -975,12 +973,7 @@ fileprivate class EqualizerView: NSView {
       }
       self[keyPath: c.keyPath] = slider
 
-      let input = NSTextField()
-      input.translatesAutoresizingMaskIntoConstraints = false
-      input.usesSingleLineMode = true
-      input.isBezeled = false
-      input.isBordered = false
-      input.drawsBackground = false
+      let input = SidebarInputField()
       input.alignment = .right
       input.tag = c.tag
       input.target = self
@@ -995,15 +988,11 @@ fileprivate class EqualizerView: NSView {
       slider.setAccessibilityLabel(label.stringValue)
       valueInputs[c.tag] = input
 
-      let inputContainer = ColoredView(color: .labelColor.withAlphaComponent(0.08), cornerRadius: 6)
-      inputContainer.translatesAutoresizingMaskIntoConstraints = false
-      inputContainer.addSubview(input)
-      input.padding(.horizontal(6)).center(.y, with: inputContainer)
-      inputContainer.size(width: 50, height: 24)
+      input.size(width: 50, height: 24)
 
       stack.addArrangedSubview(ui.hStack(
         spacing: 8,
-        ui.image(c.symbolName, size: 16, config: .sidebarIconConfig), label, slider, inputContainer
+        ui.image(c.symbolName, size: 16, config: .sidebarIconConfig), label, slider, input
       ))
 
       if let firstLabel {
@@ -1050,7 +1039,7 @@ fileprivate class EqualizerView: NSView {
     valueInputs[sender.tag]?.integerValue = sender.integerValue
     if player.scopedTrackSettings.target(.videoColor) > 0, NSApp.currentEvent?.type == .leftMouseDragged { return }
     let config = configs.first(where: { $0.tag == sender.tag })!
-    player.setScopedVideoEqualizer(config.type, value: Int(sender.intValue))
+    player.performSidebarChange { player.setScopedVideoEqualizer(config.type, value: Int(sender.intValue)) }
   }
 
   @objc private func valueInputAction(_ sender: NSTextField) {
@@ -1063,6 +1052,6 @@ fileprivate class EqualizerView: NSView {
     let value = min(100, max(-100, entered))
     sender.integerValue = value
     self[keyPath: config.keyPath]?.integerValue = value
-    player.setScopedVideoEqualizer(config.type, value: value)
+    player.performSidebarChange { player.setScopedVideoEqualizer(config.type, value: value) }
   }
 }

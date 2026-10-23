@@ -22,6 +22,53 @@ fileprivate extension Process {
   }
 }
 
+fileprivate final class JavascriptProcessOutput {
+  private let file: FileHandle
+  private let drained: DispatchGroup
+  private let lock = NSLock()
+  private var data = Data()
+  private var finished = false
+
+  var content: String {
+    lock.lock()
+    defer { lock.unlock() }
+    return String(decoding: data, as: UTF8.self)
+  }
+
+  init(_ file: FileHandle, drained: DispatchGroup, hook: JSValue?) {
+    self.file = file
+    self.drained = drained
+    drained.enter()
+    file.readabilityHandler = { [self] file in
+      let bytes = file.availableData
+      lock.lock()
+      guard !finished else { lock.unlock(); return }
+      if bytes.isEmpty {
+        finished = true
+        file.readabilityHandler = nil
+        lock.unlock()
+        drained.leave()
+      } else {
+        data.append(bytes)
+        if let hook, let output = String(data: bytes, encoding: .utf8) {
+          // JavaScript microtasks can call UI APIs while holding the VM lock.
+          DispatchQueue.main.async { hook.call(withArguments: [output]) }
+        }
+        lock.unlock()
+      }
+    }
+  }
+
+  func cancel() {
+    file.readabilityHandler = nil
+    lock.lock()
+    let wasFinished = finished
+    finished = true
+    lock.unlock()
+    if !wasFinished { drained.leave() }
+  }
+}
+
 @objc protocol JavascriptAPIUtilsExportable: JSExport {
   func fileInPath(_ file: String) -> Bool
   func resolvePath(_ path: String) -> String?
@@ -166,8 +213,6 @@ class JavascriptAPIUtils: JavascriptAPI, JavascriptAPIUtilsExportable {
       process.standardOutput = stdout
       process.standardError = stderr
 
-      var stdoutContent = ""
-      var stderrContent = ""
       var stdoutHook: JSValue?
       var stderrHook: JSValue?
       if let hookVal = stdoutHook_, hookVal.isObject {
@@ -177,33 +222,26 @@ class JavascriptAPIUtils: JavascriptAPI, JavascriptAPIUtilsExportable {
         stderrHook = hookVal
       }
 
-      stdout.fileHandleForReading.readabilityHandler = { file in
-        guard let output = String(data: file.availableData, encoding: .utf8) else { return }
-        stdoutContent += output
-        stdoutHook?.call(withArguments: [output])
-      }
-      stderr.fileHandleForReading.readabilityHandler = { file in
-        guard let output = String(data: file.availableData, encoding: .utf8) else { return }
-        stderrContent += output
-        stderrHook?.call(withArguments: [output])
-      }
+      let drained = DispatchGroup()
+      let stdoutContent = JavascriptProcessOutput(stdout.fileHandleForReading, drained: drained, hook: stdoutHook)
+      let stderrContent = JavascriptProcessOutput(stderr.fileHandleForReading, drained: drained, hook: stderrHook)
       Logger.log("Executing \(path) \(args.joined(separator: " "))", subsystem: pluginInstance.subsystem)
       do {
         try process.run()
       } catch {
+        stdoutContent.cancel()
+        stderrContent.cancel()
         reject.call(withArguments: ["Execution failed reporting: \(error.localizedDescription)"])
         return
       }
 
       self.pluginInstance.queue.async {
         process.waitUntilExit()
-        stderr.fileHandleForReading.readabilityHandler = nil
-        stdout.fileHandleForReading.readabilityHandler = nil
-        DispatchQueue.main.async {
+        drained.notify(queue: .main) {
           resolve.call(withArguments: [[
             "status": process.terminationStatus,
-            "stdout": stdoutContent,
-            "stderr": stderrContent
+            "stdout": stdoutContent.content,
+            "stderr": stderrContent.content
           ] as [String: Any]])
         }
       }

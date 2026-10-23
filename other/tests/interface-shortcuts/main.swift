@@ -83,6 +83,13 @@ window.sendEvent(press())
 check(controller.fullscreenExits==1,"next native Escape exits fullscreen when panels are absent")
 window.sendEvent(press())
 check(controller.fullscreenExits==1,"Escape is harmless without panels or fullscreen")
+controller.isCropTransitionInProgress = true
+let panelsBeforeCropEscape = controller.sidebars.hiddenCount
+window.sendEvent(press())
+check(!controller.isCropTransitionInProgress && controller.cropCancellations == 1 && controller.cropGeometryRefreshes == 1,
+      "default Escape removes a committed crop cover and restores live window geometry")
+check(controller.sidebars.hiddenCount == panelsBeforeCropEscape && controller.fullscreenExits == 1,
+      "cancelling crop motion cannot dismiss another UI layer with the same key")
 controller.sidebars.isAnyVisibleOrTransitioning=true
 controller.interactiveMode.isActive=true
 check(!controller.handleDefaultEscape(with:press()),"Custom Crop owns Escape before sidebar dismissal")
@@ -189,3 +196,8 @@ for flags: NSEvent.ModifierFlags in [[], [.shift], [.command], [.option]] {
 }
 arrowWindow.close()
 print("Focused table routing checks complete: \(checks) total checks.")
+
+controller.interactiveMode.isActive = false
+let seekCount = controller.player.userSeeks
+check(controller.handleKeyBinding(KeyMapping(rawKey:"RIGHT",rawAction:"seek 5",isIINACommand:false)) && controller.player.userSeeks == seekCount + 1,
+      "native seek binding identifies user intent during a paused crop refresh")

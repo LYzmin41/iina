@@ -20,6 +20,10 @@ enum MPVOption {
   enum Window { static let windowScale = "window-scale" }
 }
 enum MPVProperty { static let vf = "vf", af = "af" }
+enum AppData {
+  static let cropsInPanel = ["None", "4:3", "16:9", "16:10", "21:9", "5:4"]
+  static let aspects = ["4:3", "5:4", "16:9", "16:10", "1:1", "3:2", "2.21:1", "2.35:1", "2.39:1"]
+}
 class MPVFixture {
   var options = ["video-aspect-override":"-1", "video-rotate":"0", "panscan":"0", "video-zoom":"0"]
   var videoFilters: [MPVFilter] = []
@@ -59,7 +63,9 @@ class InfoFixture {
 }
 class InteractiveFixture { var onExit: (() -> Void)?; func exit() { onExit?(); onExit = nil } }
 class WindowFixture {
+  func prepareVideoTransformWindowReference() {}
   var loaded = true
+  var isCropTransitionInProgress = false
   let interactiveMode = InteractiveFixture()
   var finishCount = 0
   var videoAspectTransitionOriginalPanscan: Double?
@@ -79,15 +85,21 @@ class PlayerFixture {
   var refreshSucceeds = true
   var refreshes: [[Int]] = []
   var warnings = 0
+  var settingsUpdates = 0
+  var geometryReads = 0
   var geometry = CropVideoGeometry(sourceSize: NSSize(width: 1280, height: 720), displaySize: NSSize(width: 1280, height: 720), rotation: 0)
   func log(_ text: String, level: Logger.Level) { warnings += 1 }
-  func postNotification(_ notification: Notification) {}
+  func postNotification(_ notification: Notification) { settingsUpdates += 1 }
   func refreshTrackProcessing(_ type: MPVTrack.TrackType, videoOverride: [Int]) -> Bool {
     refreshes.append(videoOverride); return refreshSucceeds
   }
-  func interactiveVideoGeometry(uncropped: Bool) -> CropVideoGeometry { geometry }
+  func interactiveVideoGeometry(uncropped: Bool) -> CropVideoGeometry { geometryReads += 1; return geometry }
   @discardableResult func setCrop(fromFilter filter: MPVFilter) -> Bool { info.cropFilter = filter; return true }
   func removeCropFilter() { info.cropFilter = nil; info.unsureCrop = "None" }
+  private func applyCropChange(_ filter: MPVFilter?, description: String, outputSize: NSSize?) {
+    if let filter { if setCrop(fromFilter: filter) { info.unsureCrop = description } }
+    else { removeCropFilter() }
+  }
   // PRODUCTION_METHODS
   func start(_ url: URL, loaded: Bool = true) {
     info.currentURL = url

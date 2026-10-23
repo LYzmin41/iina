@@ -6,6 +6,7 @@ struct LayoutValue {
   func use(_ body: @escaping (CGFloat) -> Void, applyNow: Bool = true) { if applyNow { body(value) } }
 }
 final class PlayerCore {
+  @discardableResult func performSidebarChange<T>(_ action: () -> T) -> T { action() }
   struct Info { struct State { let active = true }; let state = State() }
   let info = Info()
   func observe(_ key: Notification.Name, _ handler: @escaping (Notification) -> Void) {}

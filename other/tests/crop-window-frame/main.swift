@@ -52,10 +52,6 @@ enum MPVProperty { static let dwidth = "dwidth", dheight = "dheight", coreIdle =
 enum NotificationFixture { case iinaAIDChanged, iinaSIDChanged }
 enum AccessibilityPreferences { static func adjustedDuration(_ value: TimeInterval) -> TimeInterval { value } }
 enum OSDFixture { case track(TrackFixture, position: Int? = nil), custom(String) }
-struct Regex {
-  static let aspect = Regex()
-  func matches(_ value: String) -> Bool { value.range(of: #"\A\d+(\.\d+)?:\d+(\.\d+)?\Z"#, options: .regularExpression) != nil }
-}
 class MPVFixture {
   enum LogLevel { case verbose }
   var scaleWrites = 0
@@ -81,6 +77,9 @@ class MPVFixture {
 }
 class EventsFixture { enum Event { case windowSizeAdjusted }; var count = 0; func emit(_ event: Event, data: NSRect) { count += 1 } }
 class PlayerFixture {
+  enum OSDFeedbackOrigin { case command, sidebar }
+  var currentOSDFeedbackOrigin: OSDFeedbackOrigin { .command }
+  func preservingOSDFeedbackOrigin<T>(_ action: @escaping () -> T) -> () -> T { action }
   weak var mainWindow: CropWindowFixture!
   let mpv = MPVFixture()
   private func reconcileTrackGraph() {}
@@ -90,8 +89,17 @@ class PlayerFixture {
     getSelectedTracks()
     return true
   }
+  private enum CropRefreshUpdate { case video }
+  private func deferCropRefreshUpdate(_ update: CropRefreshUpdate) -> Bool { false }
   // PRODUCTION_PLAYER_TRANSFORMS
   var videoSizeForDisplay = (3840, 924)
+  var sourceDisplaySize: NSSize?
+  struct Geometry { let displaySize: NSSize }
+  func interactiveVideoGeometry(uncropped: Bool) -> Geometry {
+    Geometry(displaySize: sourceDisplaySize ?? NSSize(width: videoSizeForDisplay.0, height: videoSizeForDisplay.1))
+  }
+  var geometry: GeometryDef?
+  func getGeometry() -> GeometryDef? { geometry }
   var info = InfoFixture()
   var events = EventsFixture()
   var disableWindowAnimation = true
@@ -101,20 +109,52 @@ class PlayerFixture {
   func postNotification(_ name: NotificationFixture) { notifications += 1 }
   func sendOSD(_ message: OSDFixture) {}
   func notifyWindowVideoSizeChanged() { mainWindow.handleVideoSizeChange(keepWindowSize: false) }
+  // PRODUCTION_OUTPUT_CHANGE
 }
 class PIPFixture { var aspectRatio = NSSize.zero }
-struct GeometryFixture { var hasExplicitSize = false }
 struct MemoryUsage { static let shared = MemoryUsage(); func logUsage(_ text: String) {} }
 extension NSWindow { func selectDefaultScreen() -> NSScreen { screen ?? NSScreen.main! } }
 // PRODUCTION_CONSTANTS
 // PRODUCTION_EXTENSIONS
-class TransitionLayerFixture { var updates = 0; func update(force: Bool) { updates += 1 } }
+class TransitionLayerFixture {
+ var updates = 0, isAnimatingWindowResize = false
+ func update(force: Bool) { updates += 1 }
+}
 class TransitionVideoFixture {
  var active = 0, idle = 0; let videoLayer = TransitionLayerFixture()
  func displayActive() { active += 1 }; func displayIdle() { idle += 1 }
 }
+class CropExitFixture: NSView { var targetWindowFrame: NSRect?; var isPreparingSource = false; var isCommitting = false; var targetDisplaySize = NSSize.zero }
+class LiveTextFixture { func requestAnalysis() {} }
 class CropWindowFixture {
-  var cropExitOverlay: NSView?
+  let liveText = LiveTextFixture()
+  final class Floating { func updatePosition() {} }
+  let oscFloatingView = Floating()
+  func invalidateFloatingOSCLayout() {}
+  var cropExitOverlay: CropExitFixture?
+  // Animation is a fixture boundary here; production geometry-motion sequencing
+  // has its own suite. Keep the real frame calculation under transition ownership.
+  enum VideoGeometryChange { case aspect, rotation }
+  final class GeometryMotionFixture {
+    var waitingForFrame = true
+    var targetDisplaySize: NSSize?
+    var targetWindowFrame: NSRect?
+  }
+  var geometryMotion: GeometryMotionFixture?
+  var geometryRequests: [VideoGeometryChange] = []
+  var isCropTransitionInProgress: Bool { cropExitOverlay != nil || geometryMotion != nil }
+  func enqueueVideoGeometryChange(_ kind: VideoGeometryChange, request: @escaping () -> Void) -> Bool { false }
+  func performVideoGeometryChange(_ kind: VideoGeometryChange, apply: @escaping () -> Bool) {
+    geometryRequests.append(kind)
+    let motion = GeometryMotionFixture()
+    geometryMotion = motion
+    _ = apply()
+    geometryMotion = nil
+    if let target = motion.targetWindowFrame { window?.setFrame(target, display: false) }
+  }
+  func geometryVideoOutputDidChange() {}
+  var cropReadySignals = 0
+  func finishCropExitTransition(outputIsReady: Bool = false) { if outputIsReady { cropReadySignals += 1 } }
   var cropAnimationTargets: [(NSRect, NSRect)] = []
   func startCropExitAnimation(to frame: NSRect, duration: TimeInterval) {
     cropAnimationTargets.append((frame, window!.frame))
@@ -126,8 +166,10 @@ class CropWindowFixture {
   var fsState = FullscreenState.windowed
   var oscPosition = Preference.OSCPosition.floating
   private var isApplyingVideoTransformWindowFrame = false
-  private var videoTransformWindowArea: CGFloat?
+  private var videoTransformWindowReferenceSize: NSSize?
   private var videoTransformWindowSize: NSSize?
+  private var videoTransformWindowDisplaySize: NSSize?
+  private var videoTransformWindowGeneration: Int?
   private var videoAspectTransition: (panscan: Double, mediaGeneration: Int)?
   enum PIPStatus { case notInPIP, inPIP }
   var pipStatus = PIPStatus.notInPIP
@@ -136,13 +178,19 @@ class CropWindowFixture {
   var titleBarView = NSView()
   var muteButton = NSButton(), volumeSlider = NSSlider()
   var shouldApplyInitialWindowSize = false
-  var cachedGeometry: GeometryFixture?
+  var cachedGeometry: GeometryDef?
   var isVideoLoaded = true
   var scaleUpdates: Int { player.mpv.scaleWrites }
   func log(_ text: String) {}
-  func notifyLiveResize() { resetVideoTransformWindowArea() }
+  func notifyLiveResize() { rememberVideoTransformWindowResize() }
+  func beginWindowSession(at frame: NSRect) {
+    videoTransformWindowReferenceSize = nil
+    videoTransformWindowSize = nil
+    videoTransformWindowDisplaySize = nil
+    videoTransformWindowGeneration = nil
+    window!.setFrame(frame, display: false)
+  }
   func determineScreenToUse(_ window: NSWindow) -> NSScreen { window.selectDefaultScreen() }
-  func windowFrameFromGeometry(newSize: NSSize, screen: NSScreen) -> NSRect? { nil }
   func updateMinimumWindowSize() {}
   func updatePlayTime(withDuration: Bool, andProgressBar: Bool) {}
   // PRODUCTION_CONTROLLER_METHODS
@@ -159,34 +207,262 @@ let screen = NSScreen.main!.visibleFrame
 let original = NSRect(x: screen.midX - 250, y: screen.midY - 150, width: 500, height: 300)
 class ResizeNotifyingWindow: NSWindow {
  var onFrame: (() -> Void)?
- override func setFrame(_ rect: NSRect, display: Bool) { onFrame?(); super.setFrame(rect,display:display) }
- override func setFrame(_ rect: NSRect, display: Bool, animate: Bool) { onFrame?(); super.setFrame(rect,display:display,animate:animate) }
+ override func setFrame(_ rect: NSRect, display: Bool) { super.setFrame(rect,display:display); onFrame?() }
+ override func setFrame(_ rect: NSRect, display: Bool, animate: Bool) { super.setFrame(rect,display:display,animate:animate); onFrame?() }
 }
 let window = ResizeNotifyingWindow(contentRect: original, styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
 window.isReleasedWhenClosed = false
 controller.window = window
 controller.player.mainWindow = controller
 window.onFrame = { controller.notifyLiveResize() }
+Preference.unlockWindowAspectRatio = false
+let referenceFrame = NSRect(x: screen.midX - 480, y: screen.midY - 270, width: 960, height: 540)
+controller.beginWindowSession(at: referenceFrame)
+controller.player.sourceDisplaySize = NSSize(width: 3840, height: 2160)
+controller.player.videoSizeForDisplay = (600, 600)
+controller.shouldApplyInitialWindowSize = true
+controller.player.info.justStartedFile = true
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 600) && near(window.frame.height, 600), "Opening an already cropped file respects the initial displayed size")
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 600 * 16 / 9) && near(window.frame.height, 600),
+      "Reset on an initially cropped square reconstructs original 16:9 geometry at the same limiting height")
+controller.cachedGeometry = GeometryDef.parse("800x450+80+100")
+controller.shouldApplyInitialWindowSize = true
+controller.player.videoSizeForDisplay = (600, 600)
+controller.handleVideoSizeChange(keepWindowSize: false)
+let explicitStartup = window.frame
+check(near(explicitStartup.width, 800) && near(explicitStartup.height, 450) &&
+      near(explicitStartup.minX, screen.minX + 80) && near(explicitStartup.minY, screen.minY + 100),
+      "Both explicit startup dimensions and their position take priority over an existing square crop")
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(window.frame == explicitStartup, "Repeated first-frame geometry cannot shrink or recenter the explicitly configured window")
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(window.frame == explicitStartup, "Reset restores both size and center of an explicit 800x450 startup around a preloaded crop")
+controller.setUserWindowFrame(NSRect(x: screen.minX, y: screen.minY, width: 1800, height: 1012))
+controller.resetWindowSizingForNewSession()
+controller.player.geometry = GeometryDef.parse("800x450+80+100")
+controller.player.info.trackSelectionGeneration += 1
+controller.player.videoSizeForDisplay = (600, 600)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 800) && near(window.frame.height, 450) &&
+      near(window.frame.minX, screen.minX + 80) && near(window.frame.minY, screen.minY + 100),
+      "a reused closed player reapplies startup size and position around an already cropped file")
+controller.resetWindowSizingForNewSession()
+controller.player.geometry = GeometryDef.parse("640x360+120+80")
+controller.player.info.trackSelectionGeneration += 1
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 640) && near(window.frame.height, 360) &&
+      near(window.frame.minX, screen.minX + 120) && near(window.frame.minY, screen.minY + 80),
+      "reopening reads changed startup geometry rather than the prior session cache")
+controller.player.geometry = nil
+
+for (geometry, output, startup, reset) in [
+  ("640+100+100", (3840, 414), NSSize(width: 640, height: 225), NSSize(width: 640, height: 360)),
+  ("x400+100+100", (600, 600), NSSize(width: 400, height: 400), NSSize(width: 400 * 16 / 9, height: 400)),
+  ("800x450+100+100", (1782, 1302), NSSize(width: 800, height: 450), NSSize(width: 800, height: 450))
+] {
+  controller.cachedGeometry = GeometryDef.parse(geometry)
+  controller.shouldApplyInitialWindowSize = true
+  controller.player.videoSizeForDisplay = output
+  controller.handleVideoSizeChange(keepWindowSize: false)
+  check(near(window.frame.width, startup.width) && near(window.frame.height, startup.height),
+        "Initial geometry \(geometry) uses its specified axes and the actual cropped output")
+  let firstFrame = window.frame
+  for _ in 0..<3 { controller.handleVideoSizeChange(keepWindowSize: false) }
+  check(window.frame == firstFrame, "Repeated startup output leaves \(geometry) stable")
+  controller.player.videoSizeForDisplay = (3840, 2160)
+  controller.handleVideoSizeChange(keepWindowSize: false)
+  check(near(window.frame.width, reset.width) && near(window.frame.height, reset.height),
+        "Reset derives original geometry at the initial crop's visible scale for \(geometry)")
+}
+controller.cachedGeometry = nil
+controller.player.sourceDisplaySize = nil
+controller.player.info.justStartedFile = false
+
+controller.beginWindowSession(at: referenceFrame)
+controller.player.sourceDisplaySize = NSSize(width: 3840, height: 2160)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+window.onFrame = nil
+let resizedBeforeEditor = window.frame.centeredResize(to: NSSize(width: 1200, height: 675))
+window.setFrame(resizedBeforeEditor, display: false)
+window.onFrame = { controller.notifyLiveResize() }
+controller.prepareVideoTransformWindowReference()
+controller.cropExitOverlay = CropExitFixture(frame: NSRect(origin: .zero, size: resizedBeforeEditor.size))
+controller.player.videoSizeForDisplay = (1782, 1302)
+controller.handleVideoSizeChange(keepWindowSize: false)
+let cropAfterNativeResize = controller.cropExitOverlay!.targetWindowFrame!
+check(near(cropAfterNativeResize.height, resizedBeforeEditor.height) &&
+      near(cropAfterNativeResize.width, resizedBeforeEditor.height * 1782 / 1302),
+      "Preparing editor entry captures a native/external resize before an arbitrary inner selection")
+window.setFrame(resizedBeforeEditor.centeredResize(to: NSSize(width: 1100, height: 610)), display: false)
+controller.handleVideoSizeChange(keepWindowSize: false)
+let repeatedCropTarget = controller.cropExitOverlay!.targetWindowFrame!
+check(repeatedCropTarget.size == cropAfterNativeResize.size &&
+      near(repeatedCropTarget.midX, cropAfterNativeResize.midX) && near(repeatedCropTarget.midY, cropAfterNativeResize.midY),
+      "An intermediate animation frame cannot replace the captured reference: \(cropAfterNativeResize) -> \(repeatedCropTarget)")
+window.setFrame(cropAfterNativeResize, display: false)
+controller.cropExitOverlay = nil
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, resizedBeforeEditor.width) && near(window.frame.height, resizedBeforeEditor.height),
+      "The arbitrary crop/Reset sequence restores the full enlarged window without cumulative shrink")
+controller.player.sourceDisplaySize = nil
+controller.beginWindowSession(at: referenceFrame)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+controller.interactiveMode.isActive = true
+window.setFrame(window.frame.centeredResize(to: NSSize(width: 800, height: 450)), display: false)
+controller.interactiveMode.isActive = false
+controller.player.videoSizeForDisplay = (1782, 1302)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.height, 450), "Manually resizing the open editor updates the original reference without sampling preview geometry")
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 800) && near(window.frame.height, 450),
+      "Reset retains a manual resize made while the editor was open")
+let reportedFrame = referenceFrame.centeredResize(to: NSSize(width: 640, height: 360))
+controller.beginWindowSession(at: reportedFrame)
+for output in [(3840, 679), (3840, 414), (3840, 679)] {
+  controller.player.videoSizeForDisplay = output
+  controller.handleVideoSizeChange(keepWindowSize: false)
+  check(near(window.frame.width, 640) && near(window.frame.height, 225),
+        "reported narrow crop preserves 640pt width and 225pt minimum without expanding to the screen")
+  check(near(window.aspectRatio.aspect, window.frame.size.aspect, tolerance: 0.0001),
+        "native resize lock follows the letterboxed window rather than forcing the image ratio")
+}
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 640) && near(window.frame.height, 360),
+      "Reset after a height-clamped crop restores the original reference")
+controller.beginWindowSession(at: referenceFrame.centeredResize(to: NSSize(width: 800, height: 450)))
+controller.player.videoSizeForDisplay = (3840, 414)
+controller.handleVideoSizeChange(keepWindowSize: false)
+window.setFrame(window.frame.centeredResize(to: NSSize(width: 640, height: 225)), display: false)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 640) && near(window.frame.height, 360),
+      "Manual width reduction at minimum height scales the original reference for Reset")
+controller.player.videoSizeForDisplay = (3840, 414)
+controller.handleVideoSizeChange(keepWindowSize: false)
+controller.setWindowScale(0.125)
+check(near(window.frame.width, 480) && near(window.frame.height, 225),
+      "Explicit scale also clamps height independently instead of growing the narrow image")
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 480) && near(window.frame.height, 270),
+      "Reset follows the reference scale after explicitly resizing a letterboxed crop")
+controller.beginWindowSession(at: referenceFrame)
+window.setFrame(referenceFrame, display: false)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+controller.player.videoSizeForDisplay = (3840, 960)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 960) && near(window.frame.height, 240),
+      "wide crop fits the original window bounds instead of preserving area")
+for _ in 0..<4 {
+  for size in [(3840, 2160), (1440, 1080), (3840, 960)] {
+    controller.player.videoSizeForDisplay = size
+    controller.handleVideoSizeChange(keepWindowSize: false)
+  }
+  check(near(window.frame.width, 960) && near(window.frame.height, 240),
+        "successive aspect and crop changes use one reference without cumulative shrinking")
+}
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 960) && near(window.frame.height, 540),
+      "Reset returns to the original proportions and reference size")
+
+let largeReference = referenceFrame.centeredResize(to: NSSize(width: 1280, height: 720))
+controller.beginWindowSession(at: largeReference)
+controller.player.videoSizeForDisplay = (3840, 960)
+controller.handleVideoSizeChange(keepWindowSize: false)
+window.setFrame(window.frame.centeredResize(to: NSSize(width: 960, height: 240)), display: false)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 960) && near(window.frame.height, 540),
+      "manually shrinking a cropped window scales its original reference instead of adopting the crop bounds")
+controller.player.videoSizeForDisplay = (3840, 960)
+controller.handleVideoSizeChange(keepWindowSize: false)
+window.setFrame(window.frame.centeredResize(to: NSSize(width: 1200, height: 300)), display: false)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 1200) && near(window.frame.height, 675),
+      "manually enlarging a cropped window scales both dimensions of its original reference")
+
+controller.beginWindowSession(at: referenceFrame)
+controller.player.videoSizeForDisplay = (900, 1600)
+controller.handleVideoSizeChange(keepWindowSize: false)
+let portraitFrame = window.frame
+check(near(portraitFrame.width, 400) && near(portraitFrame.height, 540),
+      "portrait width minimum adds side fields while preserving reference height")
+window.setFrame(portraitFrame.centeredResize(to: portraitFrame.size.multiply(1.0625)), display: false)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 1020) && near(window.frame.height, 573.75),
+      "manual resize from a minimum-clamped portrait scales the original landscape reference")
+
+controller.beginWindowSession(at: NSRect(x: 100, y: 100, width: 400, height: 225))
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+controller.player.videoSizeForDisplay = (2700, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+window.setFrame(window.frame.centeredResize(to: NSSize(width: 600, height: 480)), display: false)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 853.333333) && near(window.frame.height, 480),
+      "removing minimum fields by hand updates the original scale from visible video, not padded window bounds")
+
+controller.beginWindowSession(at: referenceFrame)
+controller.player.videoSizeForDisplay = (3840, 960)
+controller.handleVideoSizeChange(keepWindowSize: false)
+controller.setWindowScale(0.3125)
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 1200) && near(window.frame.height, 675),
+      "explicit scale while cropped updates the original reference proportionally")
+
+controller.beginWindowSession(at: referenceFrame)
+controller.cropExitOverlay = CropExitFixture(frame: NSRect(origin: .zero, size: referenceFrame.size))
+controller.player.videoSizeForDisplay = (3840, 960)
+controller.handleVideoSizeChange(keepWindowSize: false)
+let deferred = controller.cropExitOverlay!.targetWindowFrame!
+check(near(deferred.width, 960) && near(deferred.height, 240) && window.frame == referenceFrame,
+      "crop transition prepares a fitted target without resizing the covered player")
+window.setFrame(referenceFrame.centeredResize(to: NSSize(width: 960, height: 390)), display: false)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(controller.cropExitOverlay!.targetWindowFrame!.size == deferred.size,
+      "an intermediate animated frame cannot scale the reference on another output notification")
+window.setFrame(deferred, display: false)
+controller.cropExitOverlay = nil
+controller.player.videoSizeForDisplay = (3840, 2160)
+controller.handleVideoSizeChange(keepWindowSize: false)
+check(near(window.frame.width, 960) && near(window.frame.height, 540),
+      "completed crop transition retains the original reference for Reset")
+
 for unlocked in [false,true] {
   Preference.unlockWindowAspectRatio = unlocked
   for physical in [false,true] {
     Preference.physical = physical
     for size in [(3840,924), (1080,1920), (3840,2160), (2,1), (1,2)] {
-      window.setFrame(original, display: false)
+      controller.beginWindowSession(at: original)
       controller.player.videoSizeForDisplay = size
       controller.handleVideoSizeChange(keepWindowSize: false)
       if unlocked {
         check(window.frame == original, "unlocked crop keeps the freely chosen frame (physical=\(physical))")
         check(window.aspectRatio == .zero, "unlocked window stays unlocked")
       } else {
-        let ratio = CGFloat(size.0) / CGFloat(size.1)
-        check(near(window.frame.width/window.frame.height, ratio, tolerance: 0.015),
-              "locked window matches crop aspect without letterboxing for \(size) (physical=\(physical))")
+        let fitted = NSSize(width: size.0, height: size.1).shrink(toSize: original.size)
+        check(near(window.frame.width, max(fitted.width, 400)) && near(window.frame.height, max(fitted.height, 225)),
+              "locked window fits the image inside reference bounds with independent minimums for \(size)")
         check(window.frame.width < 1000 && window.frame.height < 1000,
               "crop sizing derives from the 500pt window rather than source pixels")
         check(near(window.frame.midX, original.midX) && near(window.frame.midY, original.midY),
               "crop resize retains window center")
-        check(near(window.aspectRatio.aspect, ratio, tolerance: 0.0001), "native Lock follows the crop aspect")
+        check(near(window.aspectRatio.aspect, window.frame.size.aspect, tolerance: 0.005), "native Lock follows the actual window including any minimum fields")
       }
       check(controller.pip.aspectRatio == NSSize(width:size.0,height:size.1), "PiP tracks crop display geometry independently")
       let settled = window.frame
@@ -199,7 +475,7 @@ for unlocked in [false,true] {
 // Repeated aspect switches preserve the user's scale, including a minimum-size clamp.
 Preference.unlockWindowAspectRatio = false
 let roundTrip = NSRect(x: screen.midX-270, y: screen.midY-152, width:540, height:304)
-window.setFrame(roundTrip, display:false)
+controller.beginWindowSession(at: roundTrip)
 for _ in 0..<4 {
   for size in [(1280,720), (960,720), (720,1280), (1280,720)] {
     controller.player.videoSizeForDisplay = size
@@ -213,7 +489,7 @@ for _ in 0..<4 {
     }
   }
   check(near(window.frame.width,540) && near(window.frame.height,303.75),
-        "landscape/4:3/portrait round trips preserve the original area through minimum constraints")
+        "landscape/4:3/portrait round trips preserve the reference bounds through minimum constraints")
 }
 Preference.unlockWindowAspectRatio = false
 Preference.physical = false
@@ -221,31 +497,32 @@ controller.player.videoSizeForDisplay = (80000,1000)
 controller.handleVideoSizeChange(keepWindowSize:false)
 controller.player.videoSizeForDisplay = (1280,720)
 controller.handleVideoSizeChange(keepWindowSize:false)
-check(near(window.frame.width,540) && near(window.frame.height,304), "return from a screen-constrained aspect restores the intended area")
+check(near(window.frame.width,540) && near(window.frame.height,304), "return from a screen-constrained aspect restores the reference bounds")
 controller.player.videoSizeForDisplay = (3840,2160)
-window.setFrame(NSRect(x: original.minX, y: original.minY, width: 874, height: 525), display: false)
+controller.beginWindowSession(at: NSRect(x: original.minX, y: original.minY, width: 874, height: 525))
 controller.handleVideoSizeChange(keepWindowSize: false)
-check(near(window.frame.width * window.frame.height, 874*525, tolerance: 2000) && near(window.frame.size.aspect, 16.0/9, tolerance: 0.005),
-      "reported 874x525 window adopts 16:9 while retaining its area")
+check(near(window.frame.width, 874) && near(window.frame.height, 491.625) && near(window.frame.size.aspect, 16.0/9, tolerance: 0.005),
+      "reported 874x525 window fits 16:9 inside its reference bounds")
 Preference.unlockWindowAspectRatio = false
 Preference.physical = false
 controller.player.videoSizeForDisplay = (3840,924)
+controller.beginWindowSession(at: original)
 controller.fsState = FullscreenState(isFullscreen: true, priorWindowedFrame: original)
 window.setFrame(screen,display:false)
 let fullscreenFrame = window.frame
 controller.handleVideoSizeChange(keepWindowSize: false)
 check(window.frame == fullscreenFrame && controller.fsState.priorWindowedFrame!.width < 1000 &&
-      near(controller.fsState.priorWindowedFrame!.size.aspect, CGFloat(3840)/924, tolerance: 0.015),
+      near(controller.fsState.priorWindowedFrame!.width, 500) && near(controller.fsState.priorWindowedFrame!.height, 225),
       "fullscreen stays fullscreen while its prior window fits the crop at the user's scale")
 controller.fsState = .windowed
-window.setFrame(original,display:false)
+controller.beginWindowSession(at: original)
 controller.interactiveMode.isActive = true
 controller.handleVideoSizeChange(keepWindowSize: false)
 check(window.frame == original && controller.interactiveMode.resizes == 1,
       "uncropping while the editor is open only lays out its preview")
 controller.interactiveMode.isActive = false
 controller.handleVideoSizeChange(keepWindowSize: true)
-check(window.frame.width < 1000 && near(window.frame.size.aspect, CGFloat(3840)/924, tolerance: 0.015),
+check(near(window.frame.width, 500) && near(window.frame.height, 225),
       "full-source exit refresh can adapt the window from its current scale")
 controller.player.info.justStartedFile = true
 controller.player.info.justOpenedFile = true
@@ -260,7 +537,7 @@ for unlocked in [false, true] {
   Preference.unlockWindowAspectRatio = unlocked
   for manuallyOpened in [false, true] {
     window.aspectRatio = .zero
-    window.setFrame(original, display: false)
+    controller.beginWindowSession(at: original)
     for source in [(3840,2160), (1080,1920), (3840,924), (3840,2160)] {
       controller.player.info.justStartedFile = true
       controller.player.info.justOpenedFile = manuallyOpened
@@ -275,13 +552,14 @@ for unlocked in [false, true] {
       } else {
         check(window.frame.width < 1000 && window.frame.height < 1000,
               "manual/playlist loads never expand an existing 500pt window to 4K pixels")
-        check(near(window.frame.size.aspect, CGFloat(source.0)/CGFloat(source.1), tolerance: 0.015),
-              "new media gets its display aspect at the existing scale")
+        let fitted = NSSize(width: source.0, height: source.1).shrink(toSize: original.size)
+        check(near(window.frame.width, max(fitted.width, 400)) && near(window.frame.height, max(fitted.height, 225)),
+              "new media fits the existing scale and respects independent minimums")
       }
     }
     if !unlocked {
-      check(near(window.frame.width * window.frame.height, original.width * original.height, tolerance: 2000),
-            "playlist round trips retain the requested area across minimum-size clamps")
+      check(near(window.frame.width, original.width) && near(window.frame.height, original.width * 9 / 16),
+            "playlist round trips retain the reference bounds across minimum-size clamps")
     }
   }
 }
@@ -305,7 +583,7 @@ for physical in [false, true] {
 }
 Preference.physical = false
 controller.player.videoSizeForDisplay = (1280,720)
-window.setFrame(original,display:false)
+controller.beginWindowSession(at: original)
 controller.setWindowScale(100)
 check(near(window.frame.width,screen.width) || near(window.frame.height,screen.height),
       "an explicit oversized scale fits the requested video to the screen")
@@ -323,7 +601,8 @@ for unlocked in [false, true] {
       for source in [(1280, 720), (3840, 2160)] {
         let prior = NSRect(x: screen.midX - 400, y: screen.midY - 225, width: 800, height: 450)
         window.aspectRatio = .zero
-        window.setFrame(prior, display: false)
+        controller.beginWindowSession(at: prior)
+        controller.player.videoSizeForDisplay = source
         controller.player.mpv.mutation = { name, value in
           if name == MPVOption.Video.videoRotate {
             let turn = Int(value)!
@@ -343,8 +622,9 @@ for unlocked in [false, true] {
         } else {
           check(actual.width < 1000 && actual.height < 1000,
                 "\(action) starts from the 800pt window rather than clip pixels")
-          check(near(actual.size.aspect, CGFloat(output.0) / CGFloat(output.1), tolerance: 0.005),
-                "\(action) locks the window to the transformed image without bars")
+          let fitted = NSSize(width: output.0, height: output.1).shrink(toSize: prior.size)
+          check(near(actual.width, max(fitted.width, 400)) && near(actual.height, max(fitted.height, 225)),
+                "\(action) fits transformed geometry within the original bounds and minimums")
           check(near(actual.midX, prior.midX) && near(actual.midY, prior.midY),
                 "\(action) retains the current window center")
         }
@@ -359,6 +639,17 @@ for unlocked in [false, true] {
   }
 }
 controller.player.mpv.mutation = nil
+let routed = controller.geometryRequests.count
+let transformWrites = controller.player.mpv.writes.count
+controller.player.mpv.panscan = 0.35
+controller.player.setVideoAspect("4:3")
+controller.player.setVideoRotate(90)
+check(controller.geometryRequests.count == routed + 2 &&
+      controller.geometryRequests.suffix(2).elementsEqual([.aspect, .rotation]),
+      "explicit Aspect and Rotation setters route through their geometry transaction")
+check(controller.player.mpv.writes.count == transformWrites + 2 && controller.player.mpv.panscan == 0.35,
+      "explicit transforms perform one option write each without temporary panscan mutation")
+controller.player.setVideoAspect("invalid")
 let writes = controller.player.mpv.writes.count
 controller.player.setVideoRotate(45)
 check(controller.player.mpv.writes.count == writes,
@@ -373,7 +664,7 @@ for unlocked in [false, true] {
     for source in [(1280, 720), (3840, 2160), (1080, 1920)] {
       let prior = NSRect(x: screen.midX - 400, y: screen.midY - 225, width: 800, height: 450)
       window.aspectRatio = .zero
-      window.setFrame(prior, display: false)
+      controller.beginWindowSession(at: prior)
       controller.player.info.displayWidth = 1280
       controller.player.info.displayHeight = 720
       controller.player.mpv.mutation = { name, value in
@@ -387,13 +678,15 @@ for unlocked in [false, true] {
       for id in [0, 1, 0, 1] {
         let before = window.frame
         controller.player.setTrack(id, forType: .video)
-        let aspect = CGFloat(controller.player.videoSizeForDisplay.0) / CGFloat(controller.player.videoSizeForDisplay.1)
         if unlocked {
           check(window.frame == prior, "video track/None retains the freely chosen window")
         } else {
           check(window.frame.width < 1000 && window.frame.height < 1000,
                 "video track/None stays at the current scale instead of clip pixels")
-          check(near(window.frame.size.aspect, aspect, tolerance: 0.005), "video track/None updates locked aspect")
+          let output = controller.player.videoSizeForDisplay
+          let fitted = NSSize(width: output.0, height: output.1).shrink(toSize: prior.size)
+          check(near(window.frame.width, max(fitted.width, 400)) && near(window.frame.height, max(fitted.height, 225)),
+                "video track/None fits display geometry while retaining independent minimums")
           check(near(window.frame.midX, before.midX) && near(window.frame.midY, before.midY),
                 "video track/None retains the window center")
         }
@@ -402,7 +695,7 @@ for unlocked in [false, true] {
         check(window.frame == settled, "repeated track output notifications do not change window scale")
       }
       // Direct MPV output changes use the same policy even without setTrack.
-      window.aspectRatio = .zero; window.setFrame(prior, display: false)
+      window.aspectRatio = .zero; controller.beginWindowSession(at: prior)
       controller.player.videoSizeForDisplay = (3840, 2160)
       controller.player.mpv.integers[MPVProperty.dwidth] = 3840
       controller.player.mpv.integers[MPVProperty.dheight] = 2160
@@ -431,7 +724,8 @@ for unlocked in [false, true] {
 }
 check(controller.player.notifications == 10, "audio selection retains all track-change notifications")
 controller.player.mpv.mutation = nil
-// Actual transition ownership across renderer/window completion and cancellation.
+// Legacy output-notification fallback ownership, still used for non-explicit
+// output changes. Explicit Aspect/Rotation routing is checked above.
 Preference.unlockWindowAspectRatio = false
 Preference.animationsDisabled = false
 controller.player.disableWindowAnimation = false
@@ -439,7 +733,7 @@ controller.player.info.justStartedFile = false
 controller.player.mpv.panscan = 0.35
 window.orderFrontRegardless()
 check(controller.beginVideoAspectTransition() && controller.player.mpv.panscan == 1,
-      "animated aspect change fills the viewport before changing the decoded output")
+      "legacy output-change fallback fills the viewport before applying window geometry")
 check(!controller.beginVideoAspectTransition(), "overlapping changes retain one original fill value")
 controller.finishVideoAspectTransition()
 check(controller.player.mpv.panscan == 0.35, "completion restores the exact prior pan-and-scan setting")
@@ -449,8 +743,10 @@ controller.finishVideoAspectTransition()
 check(controller.player.mpv.panscan == 0.2, "a user's intervening fill change is preserved")
 controller.player.mpv.panscan = 0.35
 var filledDuringFrameApplication = false
+var asynchronousDuringFrameApplication = false
 window.onFrame = {
   filledDuringFrameApplication = filledDuringFrameApplication || controller.player.mpv.panscan == 1
+  asynchronousDuringFrameApplication = asynchronousDuringFrameApplication || controller.videoView.videoLayer.isAnimatingWindowResize
   controller.notifyLiveResize()
 }
 controller.player.videoSizeForDisplay = (720,1280)
@@ -458,6 +754,8 @@ controller.beginVideoAspectTransition()
 controller.handleVideoSizeChange(keepWindowSize:false)
 check(filledDuringFrameApplication && controller.player.mpv.panscan == 0.35,
       "fill covers the animated frame application and is restored after it")
+check(asynchronousDuringFrameApplication && !controller.videoView.videoLayer.isAnimatingWindowResize,
+      "native frame animation owns asynchronous video display only until completion")
 window.onFrame = { controller.notifyLiveResize() }
 controller.player.mpv.stringResult = -4
 check(!controller.beginVideoAspectTransition() && controller.player.mpv.panscan == 0.35,
@@ -493,14 +791,20 @@ controller.finishVideoAspectTransition()
 check(controller.player.mpv.panscan == 0, "a new-file cancellation cannot leak the prior file's saved fill")
 Preference.unlockWindowAspectRatio = false
 controller.fsState = .windowed
-window.setFrame(original, display: false)
-controller.cropExitOverlay = NSView(frame: NSRect(origin: .zero, size: original.size))
+controller.beginWindowSession(at: original)
+controller.cropExitOverlay = CropExitFixture(frame: NSRect(origin: .zero, size: original.size))
 controller.player.videoSizeForDisplay = (2902, 1421)
 controller.handleVideoSizeChange(keepWindowSize: false)
-check(controller.cropAnimationTargets.last?.1 == original,
-      "crop image expansion is scheduled before the native window resize")
-check(near(controller.cropAnimationTargets.last!.0.width, window.frame.width) &&
-      near(controller.cropAnimationTargets.last!.0.height, window.frame.height),
-      "crop image and window share the final bounds instead of two sequential zooms")
+check(window.frame == original,
+      "crop output geometry cannot resize the window before the presentation is ready")
+check(controller.cropExitOverlay!.targetWindowFrame != original,
+      "crop output records its target for the shared image and window transition")
+let signals = controller.cropReadySignals
+controller.player.onVideoReconfig()
+check(controller.cropReadySignals == signals,
+      "an intermediate video-reconfig event cannot mark the old output as ready")
+controller.player.videoOutputSizeChanged()
+check(controller.cropReadySignals == signals + 1,
+      "changed filtered output can finish a playing crop without a playback-restart event")
 window.close()
 print("Completed \(checks) native crop/rotation/aspect/track window checks.")

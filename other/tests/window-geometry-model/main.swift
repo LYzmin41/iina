@@ -19,11 +19,12 @@ for (raw, sizeEnabled, positionEnabled) in [("", false, false), ("640", true, fa
   check(draft.sizeEnabled == sizeEnabled && draft.positionEnabled == positionEnabled, "independent enabled groups for \(raw.debugDescription)")
 }
 var both = InitialWindowGeometry("640x480+20-30")
-check(both.sizeDimension == .width && both.sizeValue == 640, "both dimensions load with runtime width priority")
+check(both.independentSize && both.widthValue == 640 && both.heightValue == 480,
+      "both explicit dimensions load independently of the live aspect lock")
 both.xValue = 40
 check(both.geometryString == "640x480+40-30", "position edit preserves both loaded size dimensions")
 both.sizeValue = 800
-check(both.geometryString == "800+40-30", "size edit emits only the chosen controlling axis")
+check(both.geometryString == "800x480+40-30", "editing one explicit size retains the other dimension")
 var toggles = InitialWindowGeometry("640x480+20-30")
 toggles.sizeEnabled = false
 check(toggles.geometryString == "+20-30", "size off preserves position")
@@ -39,7 +40,7 @@ check(near(sizeOnly.width, 400) && near(sizeOnly.height, 225) && near(sizeOnly.m
 let heightOnly = InitialWindowGeometry("x50%").previewFrame(screenSize: screen)
 check(near(heightOnly.height, 400) && near(heightOnly.width, 400 * 16 / 9), "height percentage uses visible screen height")
 let bothFrame = InitialWindowGeometry("400x100").previewFrame(screenSize: screen)
-check(near(bothFrame.width, 400) && near(bothFrame.height, 225), "both-dimension preview follows effective width")
+check(near(bothFrame.width, 400) && near(bothFrame.height, 120), "both-dimension preview respects the explicit height and native minimum")
 let zeroWidth = InitialWindowGeometry("0x400").previewFrame(screenSize: screen)
 check(near(zeroWidth.height, 400), "exact zero width permits height fallback")
 let paddedZero = InitialWindowGeometry("000x400").previewFrame(screenSize: screen)
@@ -155,6 +156,9 @@ let bounded = tiny.previewFrame(screenSize: screen, minimumSize: NSSize(width: 4
 check(bounded.size == NSSize(width: 400, height: 800), "free preview clamps each axis independently to player and screen limits")
 let fittingScreen = NSSize(width: 1440, height: 900)
 let floatingMinimum = NSSize(width: 400, height: 225)
+check(InitialWindowGeometry("640").previewFrame(screenSize: fittingScreen, aspect: 3840.0 / 414,
+      minimumSize: floatingMinimum, enforceMinimumAfterScreenFit: true).size == NSSize(width: 640, height: 225),
+      "wide-crop preview preserves requested startup width while adding minimum-height fields")
 for (raw, aspect, expected) in [("400", CGFloat(1.0 / 8), NSSize(width: 400, height: 900)),
                                  ("1440", CGFloat(8), NSSize(width: 1440, height: 225))] {
   let floating = InitialWindowGeometry(raw).previewFrame(screenSize: fittingScreen, aspect: aspect,

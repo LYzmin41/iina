@@ -39,7 +39,8 @@ for value in [8.0, 8.4, 9, 8, 7.6, 8, 24, 0, 8] {
 let delay = DelayLayout(player: player)
 attach(delay)
 check(delay.subviews.allSatisfy { !($0 is NSButton) } && speed.subviews.allSatisfy { !($0 is NSButton) }, "Speed and Delay expose no inline Reset button")
-let inputCard = delay.input.superview!
-check(abs(inputCard.frame.maxX - delay.bounds.maxX) < 0.01, "Delay value reaches the trailing edge without a reset gap")
+check(abs(delay.input.frame.maxX - delay.bounds.maxX) < 0.01, "Delay value reaches the trailing edge without a reset gap")
+check(delay.input is SidebarInputField && delay.input.isBezeled && delay.input.frame.size == NSSize(width: 50, height: 24), "the native field owns the full visible input bounds")
+check(delay.input.focusRingType == .exterior && delay.input.superview === delay, "focus ring follows the complete field without an inset container")
 check(delay.fittingSize.height > 0 && delay.slider.frame.width > 0, "Delay keeps a valid slider layout")
 print("Sidebar slider layout checks passed: \(checks).")

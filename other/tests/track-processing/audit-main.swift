@@ -98,6 +98,8 @@ check(cropTransaction.mpv.getString("lavfi-complex")?.contains("[vid1]null[vo]")
       "rejected Save restores the untransformed source preview for another edit")
 check(cropTransaction.info.activeTrackIDs(.audio) == cropAudio, "source Crop failure preserves simultaneous audio")
 check(cropTransaction.finishScopedCustomCrop(crop: requestedCrop, applying: true), "source Crop retries successfully")
+check(cropTransaction.scopedTrackSettings.video[1]?.cropDescription == "Custom",
+      "source Crop publishes Custom for the selected track after a successful Save")
 check(cropTransaction.scopedCropPreview == nil && cropTransaction.scopedTrackSettings.video[1]?.crop == requestedCrop
       && cropTransaction.info.layeredVideoTrackIDs == [3, 2],
       "successful retry commits the crop and restores the previous video composition")

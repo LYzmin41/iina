@@ -57,7 +57,6 @@ class WindowGeometrySettingsSheetController: NSWindowController, NSTextFieldDele
     preview.minimumSize = oscPosition == .floating ? AppData.floatingOSCWindowMinSize : AppData.mainWindowMinSize
     preview.enforceMinimumAfterScreenFit = oscPosition == .floating
     preview.compactUI = Preference.bool(for: .compactUI)
-    draft.independentSize = false
     let screens = NSScreen.screens
     let minimum = preview.minimumSize
     let maximum = NSSize(width: max(minimum.width, screens.map { $0.visibleFrame.width }.max() ?? screenSize.width),

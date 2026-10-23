@@ -35,13 +35,17 @@ class VideoPIPViewController: PIPViewController, NSWindowDelegate {
       return
     }
     window.delegate = self
+    // The remote host is prepared with an empty container. Its early layout
+    // must not invalidate the video that is still playing in the source window.
+    guard let controller = delegate as? MainWindowController,
+          controller.videoView.window === window else { return }
     guard lastVideoWindow !== window || lastVideoSize != view.bounds.size ||
             lastVideoScale != window.backingScaleFactor else { return }
     // Record first: displaying can flush pending layout and re-enter this method.
     lastVideoWindow = window
     lastVideoSize = view.bounds.size
     lastVideoScale = window.backingScaleFactor
-    (delegate as? MainWindowController)?.videoView.prepareForPIPDisplay(render: false)
+    controller.videoView.prepareForPIPDisplay(render: false)
   }
 
   /// Force a draw after exiting PiP.

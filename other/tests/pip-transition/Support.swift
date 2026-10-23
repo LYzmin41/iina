@@ -2,6 +2,7 @@
 import Cocoa
 let UIAnimationDuration: TimeInterval = 0.25
 struct AccessibilityPreferences {
+  static let motionReductionEnabled = false
   static func adjustedDuration(_ duration: TimeInterval) -> TimeInterval { 0 }
 }
 
@@ -52,7 +53,10 @@ class PiP: NSObject {
   var dismissed = 0
   func presentAsPicture(inPicture vc: NSViewController) {
     presented += 1
-    window.contentView = vc.view
+    let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+    window.contentView = host
+    host.addSubview(vc.view)
+    vc.view.frame = host.bounds
   }
   func dismiss(_ vc: NSViewController) { dismissed += 1 }
 }
@@ -84,9 +88,17 @@ class Titlebar: NSView {
 }
 extension Notification.Name { static let iinaPIPStatusChanged = Notification.Name("test.pip") }
 class MainWindowController: NSObject {
+  func interruptPlayerCropTransition() {}
+  var isCropTransitionInProgress = false
   enum PIPStatus { case notInPIP, inPIP, intermediate }
   var pipStatus = PIPStatus.notInPIP
   var pipReturnWindowAlpha: CGFloat?
+  var pipPreparationFeedback: UUID?
+  var operationFeedbackRequests = Set<UUID>()
+  var operationFeedbackView: PreparationFeedbackView?
+  var operationFeedbackToken: DelayedPreparationFeedback.Token?
+  var isWindowLoaded = true
+  func closeFeedback() { cancelOperationFeedback() }
   enum UIAnimationState { case hidden, shown, willShow, willHide }
   var animationState = UIAnimationState.shown
   var uiAnimationGeneration = 0
@@ -120,6 +132,7 @@ class MainWindowController: NSObject {
     super.init()
     window!.contentView = videoViewContainer
     addVideoViewToWindow()
+    videoView.autoresizingMask = [.width, .height]
     pipOverlayView.isHidden = true
     fadeableViews.add(titleBarView) { .auto }
     fadeableViews.add(oscFloatingView) { .auto }

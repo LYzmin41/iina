@@ -13,7 +13,6 @@ struct InitialWindowGeometry {
   var sizeDimension = SizeDimension.width
   var sizeValue = 40
   var sizeUnit = Unit.percent
-  // The secondary dimension is retained even while aspect locking uses only one axis.
   var independentSize = false
   var otherSizeValue: Int?
   var otherSizeUnit = Unit.percent
@@ -96,6 +95,7 @@ struct InitialWindowGeometry {
         originalSizeToken = height
       }
       if let width = parsed.w, let height = parsed.h, width != "0", height != "0" {
+        independentSize = true
         let other = sizeDimension == .width ? height : width
         otherSizeValue = Self.amount(other)
         otherSizeUnit = other.hasSuffix("%") ? .percent : .points
@@ -184,6 +184,9 @@ struct InitialWindowGeometry {
       } else {
         size.width = max(minimumSize.width, Self.distance(otherSizeValue, otherSizeUnit, screenSize.width))
       }
+    } else if enforceMinimumAfterScreenFit {
+      size.width = max(size.width, minimumSize.width)
+      size.height = max(size.height, minimumSize.height)
     } else {
       let growth = max(1, minimumSize.width / size.width, minimumSize.height / size.height)
       size.width *= growth

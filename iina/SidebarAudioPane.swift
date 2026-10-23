@@ -131,13 +131,10 @@ fileprivate class AudioDelayView: SidebarSliderView {
     }
     let value = input.doubleValue
     player.setScopedAudioDelay(value)
-    if let window = input.window {
-      window.makeFirstResponder(window.contentView)
-    }
   }
 
   override func resetButtonAction() {
-    player.setScopedAudioDelay(0)
+    player.performSidebarChange { player.setScopedAudioDelay(0) }
   }
 }
 
@@ -264,7 +261,7 @@ fileprivate class EqualizerView: NSView, NSMenuDelegate {
     zip(audioEQSliders, profile.gains).forEach { (slider, gain) in
       slider.doubleValue = gain
     }
-    player.setScopedAudioEQ(profile.gains)
+    player.performSidebarChange { player.setScopedAudioEQ(profile.gains) }
   }
 
   private func update() {
@@ -310,7 +307,7 @@ fileprivate class EqualizerView: NSView, NSMenuDelegate {
   }
 
   @objc func audioEqSliderAction(_ sender: NSSlider) {
-    player.setScopedAudioEQ(audioEQSliders.map { $0.doubleValue })
+    player.performSidebarChange { player.setScopedAudioEQ(audioEQSliders.map { $0.doubleValue }) }
     eqPopUpButton.selectItem(withTag: eqCustomMenuItemTag)
   }
 

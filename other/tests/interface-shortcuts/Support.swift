@@ -42,6 +42,8 @@ struct MPVCommand: RawRepresentable {
 }
 class MPVFixture { func command(rawString: String) -> Int32 { 0 } }
 class PlayerCore {
+  var userSeeks = 0
+  func userInitiatedSeek() { userSeeks += 1 }
   static var keyBindings: [String: KeyMapping] = [:]
   var plugins: [PluginInstance] = []
   let mpv = MPVFixture()
@@ -121,6 +123,12 @@ class BaseController: NSWindowController {
   // PRODUCTION_DISPATCH
 }
 class MainWindowController: BaseController {
+  var isCropTransitionInProgress = false
+  var cropCancellations = 0
+  var cropGeometryRefreshes = 0
+  func cancelCropExitTransition() { cropCancellations += 1; isCropTransitionInProgress = false }
+  func handleVideoSizeChange(keepWindowSize: Bool) { cropGeometryRefreshes += 1 }
+  func cancelWindowDrag() {}
   lazy var menuActionHandler = MainMenuActionHandler(player: player)
   enum PIPStatus { case notInPIP, inPIP }
   var pipStatus=PIPStatus.notInPIP

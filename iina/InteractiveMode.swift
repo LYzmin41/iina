@@ -10,51 +10,779 @@ import Cocoa
 
 fileprivate let ui = UIHelper.shared
 
-final class CropExitOverlay: NSView {
-  let imageView = NSImageView()
-  var isPreparing = true
-  var isFinishing = false
-  var hasStartedAnimation = false
-  var animationComplete = false
-  var hasRenderedVideo = false
+// The native view always renders the complete source at its source aspect.
+// Crop motion moves that view and its aperture together; mpv never receives
+// per-tick geometry commands or a replacement video frame.
+final class NativeCropVideoPresentation {
+  private weak var view: NSView?
+  private weak var container: NSView?
+  private let beginLayout: () -> Void
+  private let restoreLayout: () -> Void
+  private let originalFrame: NSRect
+  private var originalTransform: CATransform3D
+  private let originalGravity: CALayerContentsGravity
+  private let originalAutoresizingMask: CAAutoresizingMask
+  private let originalScale: CGFloat
+  private var originalMask: CALayer?
+  private let aperture = CALayer()
+  private let rotatedAperture = CAShapeLayer()
+  private var pixelSize: NSSize
+  private var isPresenting = false
+  private var ownsLayout = false
+  private var presentationFrame = NSRect.zero
+  private var maximumRasterFrameSize: NSSize?
+  private var lastPresentation: (frame: NSRect, clip: NSRect, rotation: CGFloat)?
+
+  /// Resolve density before motion; the compositor can then zoom without
+  /// magnifying an editor-sized raster or reallocating it on every tick.
+  func prepareRaster(for frames: [NSRect]) {
+    let sizes = frames.map(\.size).filter {
+      $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0
+    }
+    guard let first = sizes.first else { return }
+    maximumRasterFrameSize = sizes.dropFirst().reduce(first) {
+      NSSize(width: max($0.width, $1.width), height: max($0.height, $1.height))
+    }
+    if isPresenting, let lastPresentation {
+      isPresenting = false
+      present(frame: lastPresentation.frame, clip: lastPresentation.clip, rotation: lastPresentation.rotation)
+    }
+  }
+
+  static func rasterScale(base: NSSize, maximum: NSSize, source: NSSize,
+                          backingScale: CGFloat, legacyScale: CGFloat) -> CGFloat {
+    guard [base.width, base.height, maximum.width, maximum.height,
+           source.width, source.height, backingScale, legacyScale].allSatisfy({ $0.isFinite && $0 > 0 })
+      else { return legacyScale.isFinite && legacyScale > 0 ? legacyScale : 1 }
+    let demand = backingScale * max(1, maximum.width / base.width, maximum.height / base.height)
+    // Both source axes matter for anamorphic video. Beyond source detail,
+    // increasing this full-frame raster only spends memory on upscaled pixels.
+    let detail = max(source.width / base.width, source.height / base.height)
+    let areaLimit = max(CGFloat(3840 * 2160), base.width * base.height * legacyScale * legacyScale)
+    let areaScale = sqrt(areaLimit / base.width / base.height)
+    let edgeScale = max(legacyScale, 8192 / max(base.width, base.height))
+    return max(legacyScale, min(demand, detail, areaScale, edgeScale))
+  }
+
+  private func rasterScale(for size: NSSize, view: NSView) -> CGFloat {
+    let screenScale = view.window?.backingScaleFactor ?? originalScale
+    let pixelLimit = max(pixelSize.width, pixelSize.height,
+                         max(container?.bounds.width ?? 0, container?.bounds.height ?? 0) * screenScale)
+    let legacy = min(screenScale, pixelLimit / max(size.width, size.height))
+    guard let maximumRasterFrameSize else { return legacy }
+    return Self.rasterScale(base: size, maximum: maximumRasterFrameSize, source: pixelSize,
+                            backingScale: screenScale, legacyScale: legacy)
+  }
+
+  init(view: NSView, container: NSView, pixelSize: NSSize,
+       beginLayout: @escaping () -> Void = {}, restoreLayout: @escaping () -> Void = {}) {
+    self.view = view; self.container = container; self.pixelSize = pixelSize
+    self.beginLayout = beginLayout; self.restoreLayout = restoreLayout
+    originalFrame = view.frame
+    originalTransform = view.layer?.transform ?? CATransform3DIdentity
+    originalGravity = view.layer?.contentsGravity ?? .resizeAspectFill
+    originalAutoresizingMask = view.layer?.autoresizingMask ?? []
+    originalScale = view.layer?.contentsScale ?? 1
+    originalMask = view.layer?.mask
+    aperture.backgroundColor = NSColor.white.cgColor
+    rotatedAperture.fillColor = NSColor.white.cgColor
+  }
+
+  func updateSourcePixels(_ size: NSSize) { pixelSize = size }
+
+  func setRestoration(transform: CATransform3D, mask: CALayer?) {
+    // Editor teardown may choose the final player geometry, but the live
+    // transition keeps its transform/aperture until the new output is ready.
+    originalTransform = transform
+    originalMask = mask
+  }
+
+  func present(frame: NSRect, clip: NSRect, rotation: CGFloat = 0) {
+    guard rotation.isFinite else { return }
+    guard let view, container != nil, !frame.isEmpty, !clip.isEmpty,
+          frame.width.isFinite, frame.height.isFinite else { return }
+    guard let layer = view.layer else { return }
+    lastPresentation = (frame, clip, rotation)
+    if !isPresenting {
+      isPresenting = true
+      if !ownsLayout { beginLayout(); ownsLayout = true }
+      // The window may resize while the source raster stays fixed. ViewLayer's
+      // regular parent sizing must not compete with the crop transform.
+      layer.autoresizingMask = []
+      // Allocate a full-source surface once. Changing its bounds every tick
+      // makes Core Animation wait for the native GL renderer during playback.
+      // Only the compositor transform and aperture move after this boundary.
+      let density = rasterScale(for: frame.size, view: view)
+      let screenScale = view.window?.backingScaleFactor ?? originalScale
+      let allocationScale = maximumRasterFrameSize == nil ? 1 : density / screenScale
+      let allocation = NSRect(origin: frame.origin, size: NSSize(
+        width: frame.width * allocationScale, height: frame.height * allocationScale))
+      layer.transform = CATransform3DIdentity
+      view.frame = allocation
+      presentationFrame = allocation
+      layer.contentsGravity = .resize
+      layer.contentsScale = maximumRasterFrameSize == nil ? density : screenScale
+    }
+    if rotation != 0 {
+      presentRotated(frame: frame, clip: clip, rotation: rotation, layer: layer)
+      return
+    }
+    let base = presentationFrame
+    let scaleX = frame.width / base.width, scaleY = frame.height / base.height
+    var transform = CATransform3DMakeScale(scaleX, scaleY, 1)
+    transform.m41 = frame.minX - base.minX + (frame.width - base.width) * layer.anchorPoint.x
+    transform.m42 = frame.minY - base.minY + (frame.height - base.height) * layer.anchorPoint.y
+    layer.transform = transform
+    aperture.frame = NSRect(x: (clip.minX - frame.minX) / scaleX,
+                            y: (clip.minY - frame.minY) / scaleY,
+                            width: clip.width / scaleX, height: clip.height / scaleY)
+      .intersection(view.bounds)
+    layer.mask = aperture
+  }
+
+  private func presentRotated(frame: NSRect, clip: NSRect, rotation: CGFloat, layer: CALayer) {
+    let bounds = layer.bounds
+    guard bounds.width > 0, bounds.height > 0 else { return }
+    let scaleX = frame.width / bounds.width, scaleY = frame.height / bounds.height
+    let cosine = cos(rotation), sine = sin(rotation)
+    // This maps raster coordinates into the container around the image center.
+    // CALayer applies its transform around anchorPoint, so compensate for that
+    // anchor separately instead of rotating around a possibly off-center pivot.
+    let affine = CGAffineTransform(a: cosine * scaleX, b: sine * scaleX,
+                                  c: -sine * scaleY, d: cosine * scaleY,
+                                  tx: frame.midX - cosine * scaleX * bounds.midX + sine * scaleY * bounds.midY,
+                                  ty: frame.midY - sine * scaleX * bounds.midX - cosine * scaleY * bounds.midY)
+    let anchor = NSPoint(x: bounds.minX + bounds.width * layer.anchorPoint.x,
+                         y: bounds.minY + bounds.height * layer.anchorPoint.y)
+    var transform = CATransform3DMakeAffineTransform(affine)
+    transform.m41 += affine.a * anchor.x + affine.c * anchor.y - layer.position.x
+    transform.m42 += affine.b * anchor.x + affine.d * anchor.y - layer.position.y
+    layer.transform = transform
+
+    let inverse = affine.inverted()
+    let corners = [NSPoint(x: clip.minX, y: clip.minY), NSPoint(x: clip.maxX, y: clip.minY),
+                   NSPoint(x: clip.maxX, y: clip.maxY), NSPoint(x: clip.minX, y: clip.maxY)]
+    let path = CGMutablePath()
+    path.addLines(between: corners.map { $0.applying(inverse) })
+    path.closeSubpath()
+    rotatedAperture.frame = bounds
+    rotatedAperture.bounds = bounds
+    rotatedAperture.path = path
+    layer.mask = rotatedAperture
+  }
+
+  func restore() {
+    guard isPresenting else { return }
+    isPresenting = false
+    if let view, let layer = view.layer {
+      if layer.mask === aperture || layer.mask === rotatedAperture {
+        layer.mask = originalMask
+        layer.transform = originalTransform
+      }
+      layer.contentsGravity = originalGravity
+      layer.contentsScale = view.window?.backingScaleFactor ?? originalScale
+      view.frame = originalFrame
+      layer.autoresizingMask = originalAutoresizingMask
+    }
+    restoreLayout()
+    ownsLayout = false
+  }
+}
+
+/// Geometry only: the caller supplies the shared, already-eased window clock.
+/// Rotation is in radians; positive compensation cancels mpv's clockwise turn.
+enum VideoGeometryTransition {
+  struct Sample {
+    let frame: NSRect
+    let rotation: CGFloat
+  }
+
+  /// Quarter-turn choices use the shortest signed degree delta; 180 ties turn clockwise.
+  static func shortestQuarterTurnDelta(from: Int, to: Int) -> Int {
+    let normalized = ((to % 360 - from % 360) % 360 + 360) % 360
+    return normalized > 180 ? normalized - 360 : normalized
+  }
+
+  /// The new raster's unrotated frame whose compensated bounds reproduce the old image.
+  static func startFrame(oldVisibleRect: NSRect, quarterTurnDelta: Int) -> NSRect {
+    guard abs((quarterTurnDelta % 360) / 90) % 2 == 1 else { return oldVisibleRect }
+    return NSRect(x: oldVisibleRect.midX - oldVisibleRect.height / 2,
+                  y: oldVisibleRect.midY - oldVisibleRect.width / 2,
+                  width: oldVisibleRect.height, height: oldVisibleRect.width)
+  }
+
+  static func sample(from start: NSRect, to target: NSRect, viewport: NSRect,
+                     progress: CGFloat, initialRotation: CGFloat) -> Sample {
+    guard progress.isFinite, initialRotation.isFinite,
+          !start.isEmpty, !target.isEmpty, !viewport.isEmpty else {
+      return Sample(frame: .zero, rotation: 0)
+    }
+    let progress = min(1, max(0, progress))
+    let rotation = initialRotation * (1 - progress)
+    let width = start.width + (target.width - start.width) * progress
+    let height = start.height + (target.height - start.height) * progress
+    let cosine = abs(cos(rotation)), sine = abs(sin(rotation))
+    let rotatedWidth = cosine * width + sine * height
+    let rotatedHeight = sine * width + cosine * height
+    let fit = min(1, viewport.width / rotatedWidth, viewport.height / rotatedHeight)
+    let halfWidth = rotatedWidth * fit / 2, halfHeight = rotatedHeight * fit / 2
+    let centerX = min(viewport.maxX - halfWidth, max(viewport.minX + halfWidth,
+      start.midX + (target.midX - start.midX) * progress))
+    let centerY = min(viewport.maxY - halfHeight, max(viewport.minY + halfHeight,
+      start.midY + (target.midY - start.midY) * progress))
+    return Sample(frame: NSRect(x: centerX - width * fit / 2, y: centerY - height * fit / 2,
+                               width: width * fit, height: height * fit), rotation: rotation)
+  }
+}
+
+/// Delayed, cancellable feedback for a native operation. The owner chooses
+/// whether readiness dismisses immediately or waits for a transparent breath.
+final class DelayedPreparationFeedback {
+  struct Token: Equatable {
+    fileprivate let generation: UUID
+    fileprivate init() { generation = UUID() }
+  }
+  enum FinishPolicy { case immediate, afterCurrentBreath }
+  typealias Scheduler = (TimeInterval, @escaping () -> Void) -> Void
+
+  static let activationDelay: TimeInterval = 0.5
+  static let breathingDuration: TimeInterval = 1
+  let layer = CALayer()
+  private let vignette = CAGradientLayer()
+  private let edge = CAGradientLayer()
+  private let now: () -> CFTimeInterval
+  private let schedule: Scheduler
+  private let hasPresentation: (CALayer) -> Bool
+  private(set) var isShowing = false
+  private var token: Token?
+  private var startedAt: CFTimeInterval?
+  private var isPulsing = false
+  private var completion: (() -> Void)?
+  private var finishRequested = false
+
+  init(namePrefix: String = "preparation", now: @escaping () -> CFTimeInterval = CACurrentMediaTime,
+       schedule: @escaping Scheduler = { delay, action in
+         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+       }, hasPresentation: @escaping (CALayer) -> Bool = { $0.presentation() != nil }) {
+    self.now = now
+    self.schedule = schedule
+    self.hasPresentation = hasPresentation
+    layer.name = namePrefix + "Feedback"
+    layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    layer.opacity = 0
+    vignette.name = namePrefix + "Vignette"
+    vignette.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    vignette.type = .radial
+    vignette.startPoint = CGPoint(x: 0.5, y: 0.5)
+    vignette.endPoint = CGPoint(x: 1, y: 1)
+    vignette.colors = [0, 0, 0.12, 0.34, 0.52].map {
+      NSColor.black.withAlphaComponent($0).cgColor
+    }
+    vignette.locations = [0, 0.16, 0.40, 0.70, 1]
+    layer.addSublayer(vignette)
+    // The same parent opacity drives both accents, including their endpoint.
+    edge.name = namePrefix + "VignetteEdge"
+    edge.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    edge.type = .radial
+    edge.startPoint = vignette.startPoint
+    edge.endPoint = vignette.endPoint
+    edge.colors = [0, 0, 0.015, 0.08].map {
+      NSColor.white.withAlphaComponent($0).cgColor
+    }
+    edge.locations = [0, 0.82, 0.94, 1]
+    vignette.addSublayer(edge)
+  }
+
+  @discardableResult
+  func begin(pulse: Bool) -> Token {
+    // Also remove a previous cancellation's fade before starting the delay.
+    end(animated: false)
+    let token = Token()
+    self.token = token
+    isShowing = true
+    schedule(Self.activationDelay) { [weak self] in self?.activate(pulse: pulse, token: token) }
+    return token
+  }
+
+  private func activate(pulse: Bool, token: Token) {
+    guard self.token == token, isShowing else { return }
+    // An animation installed before the first backing-layer presentation can
+    // be discarded. A fast operation must stay transparent even in this gap.
+    guard hasPresentation(layer) else {
+      schedule(1 / 60.0) { [weak self] in self?.activate(pulse: pulse, token: token) }
+      return
+    }
+    let started = now()
+    startedAt = started
+    isPulsing = pulse
+    let visibleOpacity = layer.presentation()?.opacity ?? layer.opacity
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.opacity = 1
+    vignette.opacity = pulse ? 0 : 0.5
+    vignette.removeAnimation(forKey: "breathing")
+    if pulse {
+      let breathing = CABasicAnimation(keyPath: "opacity")
+      breathing.fromValue = Float(0)
+      breathing.toValue = Float(0.7)
+      breathing.duration = Self.breathingDuration / 2
+      breathing.beginTime = vignette.convertTime(started, from: nil)
+      breathing.autoreverses = true
+      breathing.repeatCount = .infinity
+      breathing.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      vignette.add(breathing, forKey: "breathing")
+    } else {
+      let fade = CABasicAnimation(keyPath: "opacity")
+      fade.fromValue = visibleOpacity
+      fade.toValue = Float(1)
+      fade.duration = 0.15
+      fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+      layer.add(fade, forKey: "visibility")
+    }
+    CATransaction.commit()
+  }
+
+  static func cycleEnd(startedAt: CFTimeInterval, readyAt: CFTimeInterval) -> CFTimeInterval {
+    let cycles = max(1, ceil(max(0, readyAt - startedAt) / breathingDuration))
+    return startedAt + cycles * breathingDuration
+  }
+
+  /// Accept one success continuation per active token. Cancellation/replacement
+  /// suppresses that continuation; stale or duplicate finish requests return false.
+  @discardableResult
+  func finish(_ token: Token, policy: FinishPolicy, completion: @escaping () -> Void) -> Bool {
+    guard self.token == token, !finishRequested else { return false }
+    finishRequested = true
+    guard policy == .afterCurrentBreath, let started = startedAt, isPulsing else {
+      end(animated: false)
+      completion()
+      return true
+    }
+    self.completion = completion
+    let current = now()
+    let endpoint = Self.cycleEnd(startedAt: started, readyAt: current)
+    // Keep the original animation clock and stop at its transparent endpoint.
+    if let breathing = vignette.animation(forKey: "breathing")?.copy() as? CABasicAnimation {
+      breathing.repeatCount = Float((endpoint - started) / Self.breathingDuration)
+      vignette.add(breathing, forKey: "breathing")
+    }
+    schedule(max(0, endpoint - current)) { [weak self] in
+      guard let self, self.token == token, self.isShowing else { return }
+      let completion = self.completion
+      self.end(animated: false)
+      completion?()
+    }
+    return true
+  }
+
+  func cancel(_ token: Token, animated: Bool = true) {
+    guard self.token == token else { return }
+    end(animated: animated)
+  }
+
+  fileprivate func end(animated: Bool) {
+    guard isShowing || !animated else { return }
+    isShowing = false
+    token = nil
+    completion = nil
+    finishRequested = false
+    let elapsed = now() - (startedAt ?? now())
+    let ramp = min(1, max(0, elapsed / 0.15))
+    let visibleOpacity = layer.presentation()?.opacity ?? Float(1 - pow(1 - ramp, 3))
+    startedAt = nil
+    isPulsing = false
+    let vignetteOpacity = vignette.presentation()?.opacity ?? vignette.opacity
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    vignette.opacity = vignetteOpacity
+    vignette.removeAnimation(forKey: "breathing")
+    layer.opacity = 0
+    layer.removeAnimation(forKey: "visibility")
+    if animated && visibleOpacity > 0 {
+      let fade = CABasicAnimation(keyPath: "opacity")
+      fade.fromValue = visibleOpacity
+      fade.toValue = Float(0)
+      fade.duration = 0.12
+      fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+      layer.add(fade, forKey: "visibility")
+    }
+    CATransaction.commit()
+  }
+}
+
+/// Transparent host for operations that do not already own an overlay layer.
+final class PreparationFeedbackView: NSView {
+  let feedback = DelayedPreparationFeedback()
 
   override init(frame: NSRect) {
     super.init(frame: frame)
     autoresizingMask = [.width, .height]
     wantsLayer = true
     layer?.masksToBounds = true
-    imageView.imageScaling = .scaleProportionallyUpOrDown
-    imageView.wantsLayer = true
-    addSubview(imageView)
+    feedback.layer.frame = bounds
+    layer?.addSublayer(feedback.layer)
+  }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+final class CropTransitionOverlay: NSView {
+  struct PlayerFrame {
+    let selection: NSRect
+    let videoRect: NSRect
+    let viewport: NSRect
+
+    var sourceFrame: NSRect {
+      let width = videoRect.width / selection.width
+      let height = videoRect.height / selection.height
+      return NSRect(x: videoRect.minX - selection.minX * width,
+                    y: videoRect.minY - selection.minY * height, width: width, height: height)
+    }
+
+    var contentsRect: NSRect {
+      NSRect(x: (videoRect.minX - viewport.minX) / viewport.width,
+             y: (videoRect.minY - viewport.minY) / viewport.height,
+             width: videoRect.width / viewport.width, height: videoRect.height / viewport.height)
+    }
+  }
+
+  private let preparationFeedback = DelayedPreparationFeedback(namePrefix: "cropPreparation")
+  private var preparationToken: DelayedPreparationFeedback.Token?
+  var isShowingPreparationFeedback: Bool { preparationFeedback.isShowing }
+  static let preparationFeedbackDelay = DelayedPreparationFeedback.activationDelay
+  static let preparationBreathingDuration = DelayedPreparationFeedback.breathingDuration
+  private let controls = CALayer()
+  private let canvas = CALayer()
+  private let dimming = CAShapeLayer()
+  private let cropMask = CAShapeLayer()
+  private let borderCanvas = CALayer()
+  private let borderMask = CAShapeLayer()
+  private let outline = CAShapeLayer()
+  private let corners = CAShapeLayer()
+  private var timer: Timer?
+  private var animationDisplayLink: AnyObject?
+  private var animationGeneration = 0
+  private(set) var sourceSize = NSSize.zero
+  private(set) var selection = NSRect.zero
+  private(set) var imageFrame = NSRect.zero
+  private var initialImage = NSRect.zero
+  private var initialAperture = NSRect.zero
+  private var initialSelection = NSRect.zero
+  private var initialControls = NSRect.zero
+  private var initialPlayerFrame: PlayerFrame?
+  private(set) var nativeVideo: NativeCropVideoPresentation?
+  private var isEditorEntry = false
+  private var playerVideoFrames: (from: PlayerFrame, to: PlayerFrame)?
+  var targetSelection = NSRect.zero
+  var targetDisplaySize = NSSize.zero
+  var targetFilterRect = NSRect.zero
+  var expectedSourceSize = NSSize.zero
+  var isPreparingSource = false
+  var isCommitting = false
+  var isAwaitingNativeFrame = false
+  var nativeFrameWasRendered = false
+  var pendingNativeFrameCompletion: (() -> Void)?
+  var applyCrop: (() -> Void)?
+  var sourceVideoSize = NSSize.zero
+  var entryImageFrame = NSRect.zero
+  var entryClip = NSRect.zero
+  var entryControlsFrame = NSRect.zero
+  var isPreparing = true
+  var isFinishing = false
+  var isTransforming = false
+  var isPlayerTransition = false
+  var wasAnimatingWindowResize = false
+  var hasRenderedVideo = false
+  var targetWindowFrame: NSRect?
+  var waitsForOutput = false
+  var mediaGeneration = 0
+  var playerVideoFrame = NSRect.zero
+
+  override init(frame: NSRect) {
+    super.init(frame: frame)
+    autoresizingMask = [.width, .height]
+    wantsLayer = true
+    layer?.masksToBounds = true
+    preparationFeedback.layer.frame = bounds
+    layer?.addSublayer(preparationFeedback.layer)
+    layer?.addSublayer(controls)
+    layer?.addSublayer(canvas)
+    canvas.addSublayer(dimming)
+    dimming.fillColor = NSColor.black.cgColor
+    dimming.fillRule = .evenOdd
+    canvas.mask = cropMask
+    layer?.addSublayer(borderCanvas)
+    borderCanvas.mask = borderMask
+    for shape in [outline, corners] {
+      shape.fillColor = nil
+      shape.strokeColor = NSColor.white.cgColor
+      borderCanvas.addSublayer(shape)
+    }
+    outline.lineWidth = 1
+    corners.lineWidth = 3
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  deinit { stopAnimation() }
 
   override func hitTest(_ point: NSPoint) -> NSView? {
     bounds.contains(convert(point, from: superview)) ? self : nil
   }
 
-  func show(_ image: NSImage, selection: NSRect, sourceSize: NSSize, initialFrame: NSRect) {
-    let region = NSRect(x: selection.minX * image.size.width / sourceSize.width,
-                        y: selection.minY * image.size.height / sourceSize.height,
-                        width: selection.width * image.size.width / sourceSize.width,
-                        height: selection.height * image.size.height / sourceSize.height)
-    imageView.image = NSImage(size: initialFrame.size, flipped: false) { target in
-      image.draw(in: target, from: region, operation: .copy, fraction: 1)
-      return true
-    }
-    imageView.frame = initialFrame
-    layer?.backgroundColor = NSColor.black.cgColor
+  // Keep the crop API and layer identities stable while sharing the owner.
+  func beginPreparationFeedback(pulse: Bool) {
+    guard !isShowingPreparationFeedback else { return }
+    preparationToken = preparationFeedback.begin(pulse: pulse)
   }
 
-  func finish(frame: NSRect, duration: TimeInterval, completion: @escaping () -> Void) {
-    NSAnimationContext.runAnimationGroup { context in
-      context.duration = duration
-      context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-      imageView.animator().frame = frame
-    } completionHandler: {
+  static func preparationCycleEnd(startedAt: CFTimeInterval, readyAt: CFTimeInterval) -> CFTimeInterval {
+    DelayedPreparationFeedback.cycleEnd(startedAt: startedAt, readyAt: readyAt)
+  }
+
+  func finishPreparationFeedback(completion: @escaping () -> Void) {
+    guard let token = preparationToken else { completion(); return }
+    preparationFeedback.finish(token, policy: .afterCurrentBreath) { [weak self] in
+      if self?.preparationToken == token { self?.preparationToken = nil }
       completion()
     }
+  }
+
+  func endPreparationFeedback(animated: Bool = true) {
+    preparationFeedback.end(animated: animated)
+    preparationToken = nil
+  }
+
+  func useNativeVideo(_ view: NSView, in container: NSView, pixelSize: NSSize,
+                      beginLayout: @escaping () -> Void = {}, restoreLayout: @escaping () -> Void = {}) {
+    if nativeVideo == nil {
+      nativeVideo = NativeCropVideoPresentation(view: view, container: container, pixelSize: pixelSize,
+                                                beginLayout: beginLayout, restoreLayout: restoreLayout)
+    } else { nativeVideo?.updateSourcePixels(pixelSize) }
+  }
+
+  func show(selection: NSRect, sourceSize: NSSize, initialFrame: NSRect,
+            initialClip: NSRect, initialSelection: NSRect, controlsImage: NSImage?, controlsFrame: NSRect,
+            entering: Bool = false) {
+    isPlayerTransition = false
+    isEditorEntry = entering
+    canvas.mask = cropMask
+    dimming.isHidden = false
+    borderCanvas.isHidden = false
+    controls.isHidden = false
+    self.selection = selection
+    self.sourceSize = sourceSize
+    self.initialImage = initialFrame
+    self.initialSelection = initialSelection
+    initialAperture = NSRect(x: (initialClip.minX - initialFrame.minX) * sourceSize.width / initialFrame.width,
+                            y: (initialClip.minY - initialFrame.minY) * sourceSize.height / initialFrame.height,
+                            width: initialClip.width * sourceSize.width / initialFrame.width,
+                            height: initialClip.height * sourceSize.height / initialFrame.height)
+      .intersection(NSRect(origin: .zero, size: sourceSize))
+    initialControls = controlsFrame
+    controls.contents = controlsImage?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    controls.frame = controlsFrame
+    layer?.backgroundColor = nil
+    present(image: initialFrame, clip: initialClip, outlineSelection: initialSelection,
+            outlineOpacity: 1, dimOpacity: 0.52)
+  }
+
+  func showPlayerFrame(frame: PlayerFrame? = nil) {
+    imageFrame = bounds
+    isPlayerTransition = true
+    initialPlayerFrame = frame
+    layer?.backgroundColor = nil
+    canvas.mask = nil
+    dimming.isHidden = true
+    borderCanvas.isHidden = true
+    controls.isHidden = true
+  }
+
+  func setPlayerTargetFrame(_ frame: PlayerFrame?, present: Bool = true) {
+    if let from = initialPlayerFrame, let to = frame {
+      playerVideoFrames = (from, to)
+      nativeVideo?.prepareRaster(for: [from.sourceFrame, to.sourceFrame])
+    }
+    if present { presentPlayerTransition(progress: 0) }
+  }
+
+  func presentPlayerTransition(progress: CGFloat) {
+    guard let from = playerVideoFrames?.from ?? initialPlayerFrame else { return }
+    let to = playerVideoFrames?.to ?? from
+    nativeVideo?.present(frame: Self.interpolate(from.sourceFrame, to.sourceFrame, progress),
+                         clip: Self.interpolate(from.videoRect, to.videoRect, progress))
+  }
+
+  static func interpolate(_ from: NSRect, _ to: NSRect, _ progress: CGFloat) -> NSRect {
+    NSRect(x: from.minX + (to.minX - from.minX) * progress,
+           y: from.minY + (to.minY - from.minY) * progress,
+           width: from.width + (to.width - from.width) * progress,
+           height: from.height + (to.height - from.height) * progress)
+  }
+
+  static func fit(_ size: NSSize, in bounds: NSRect) -> NSRect {
+    let scale = min(bounds.width / size.width, bounds.height / size.height)
+    return NSRect(x: bounds.midX - size.width * scale / 2,
+                  y: bounds.midY - size.height * scale / 2,
+                  width: size.width * scale, height: size.height * scale)
+  }
+
+  func selectionFrame(in image: NSRect) -> NSRect {
+    sourceFrame(selection, in: image)
+  }
+
+  private func sourceFrame(_ rect: NSRect, in image: NSRect) -> NSRect {
+    NSRect(x: image.minX + rect.minX * image.width / sourceSize.width,
+           y: image.minY + rect.minY * image.height / sourceSize.height,
+           width: rect.width * image.width / sourceSize.width,
+           height: rect.height * image.height / sourceSize.height)
+  }
+
+  func transformedImage(fitting target: NSRect) -> NSRect {
+    let width = target.width * sourceSize.width / selection.width
+    let height = target.height * sourceSize.height / selection.height
+    return NSRect(x: target.minX - selection.minX * width / sourceSize.width,
+                  y: target.minY - selection.minY * height / sourceSize.height,
+                  width: width, height: height)
+  }
+
+  func presentTransition(to target: NSRect, progress: CGFloat, letterboxed: Bool = false,
+                         outlineOpacity: CGFloat? = nil) {
+    let image = Self.interpolate(initialImage, transformedImage(fitting: target), progress)
+    let aperture = Self.interpolate(initialAperture, selection, progress)
+    let outlineSelection = Self.interpolate(initialSelection, selection, progress)
+    let destination = NSRect(x: bounds.midX - initialControls.width / 2,
+                             y: -initialControls.height - 8,
+                             width: initialControls.width, height: initialControls.height)
+    controls.frame = Self.interpolate(initialControls, destination, progress)
+    present(image: image, clip: sourceFrame(aperture, in: image), outlineSelection: outlineSelection,
+            outlineOpacity: outlineOpacity ?? min(1, (1 - progress) * 4), dimOpacity: 0.52 * (1 - progress))
+    let clip = sourceFrame(aperture, in: image)
+    nativeVideo?.present(frame: image, clip: clip)
+  }
+
+  private func present(image: NSRect, clip: NSRect, outlineSelection: NSRect,
+                       outlineOpacity: CGFloat, dimOpacity: CGFloat) {
+    imageFrame = image
+    canvas.frame = bounds
+    cropMask.frame = bounds
+    cropMask.path = CGPath(rect: clip, transform: nil)
+    borderCanvas.frame = bounds
+    borderMask.frame = bounds
+    borderMask.path = CGPath(rect: clip.insetBy(dx: -3, dy: -3), transform: nil)
+    let rect = sourceFrame(outlineSelection, in: image)
+    let outside = CGMutablePath()
+    outside.addRect(clip)
+    let visibleSelection = rect.intersection(clip)
+    if !visibleSelection.isEmpty { outside.addRect(visibleSelection) }
+    dimming.path = outside
+    dimming.opacity = Float(dimOpacity)
+    outline.path = CGPath(rect: rect, transform: nil)
+    outline.opacity = outlineSelection.isEmpty ? 0 : Float(outlineOpacity * 0.85)
+    let path = CGMutablePath()
+    let length = min(14, min(rect.width, rect.height) / 3)
+    for (x, dx) in [(rect.minX, CGFloat(1)), (rect.maxX, CGFloat(-1))] {
+      for (y, dy) in [(rect.minY, CGFloat(1)), (rect.maxY, CGFloat(-1))] {
+        path.move(to: NSPoint(x: x, y: y + dy * length))
+        path.addLine(to: NSPoint(x: x, y: y))
+        path.addLine(to: NSPoint(x: x + dx * length, y: y))
+      }
+    }
+    corners.path = path
+    corners.opacity = outlineSelection.isEmpty ? 0 : Float(outlineOpacity)
+  }
+
+  enum AnimationCurve {
+    case easeOut
+    case smoothstep
+
+    func progress(at time: Double) -> CGFloat {
+      switch self {
+      case .easeOut:
+        return CGFloat(1 - pow(1 - time, 3))
+      case .smoothstep:
+        return CGFloat(time * time * (3 - 2 * time))
+      }
+    }
+  }
+
+  func animate(duration: TimeInterval, curve: AnimationCurve = .easeOut, startOnFirstTick: Bool = false,
+               update: @escaping (CGFloat) -> Void,
+               completion: @escaping () -> Void) {
+    stopAnimation()
+    let generation = animationGeneration
+    var start: CFTimeInterval? = startOnFirstTick ? nil : CACurrentMediaTime()
+    let advance: (Double) -> Void = { [weak self] time in
+      guard let self, self.animationGeneration == generation else { return }
+      let progress = curve.progress(at: time)
+      // Window, editor UI and native projection use the same refresh target.
+      // Leave their publication in AppKit's normal main-loop transaction.
+      let actionsWereDisabled = CATransaction.disableActions()
+      CATransaction.setDisableActions(true)
+      update(progress)
+      CATransaction.setDisableActions(actionsWereDisabled)
+      if time >= 1, self.animationGeneration == generation {
+        self.stopAnimation()
+        completion()
+      }
+    }
+    let tick: (CFTimeInterval) -> Void = { timestamp in
+      if start == nil { start = timestamp }
+      advance(min(1, max(0, (timestamp - start!) / duration)))
+    }
+    guard duration > 0 else { advance(1); return }
+    if #available(macOS 14.0, *), let window, window.isVisible,
+       let screen = window.screen, screen.maximumFramesPerSecond > 0 {
+      let target = AnimationDisplayLinkTarget(tick: tick)
+      let link = window.displayLink(target: target, selector: #selector(AnimationDisplayLinkTarget.advance(_:)))
+      let maximum = Float(screen.maximumFramesPerSecond)
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, maximum), maximum: maximum, preferred: maximum)
+      animationDisplayLink = link
+      link.add(to: .main, forMode: .common)
+      // A display link stops calling back when its window leaves all displays.
+      // Complete at the original deadline even if it becomes occluded/detached.
+      let watchdog = Timer(timeInterval: duration, repeats: startOnFirstTick) { _ in
+        if startOnFirstTick {
+          if let start {
+            if CACurrentMediaTime() - start < duration { return }
+          } else if window.isVisible, window.occlusionState.contains(.visible) {
+            // An occupied main loop can delay the first refresh callback. It
+            // belongs to preparation; preserve the full requested movement.
+            return
+          }
+        }
+        advance(1)
+      }
+      timer = watchdog
+      RunLoop.main.add(watchdog, forMode: .common)
+      return
+    }
+    let timer = Timer(timeInterval: 1 / 120.0, repeats: true) { _ in tick(CACurrentMediaTime()) }
+    self.timer = timer
+    RunLoop.main.add(timer, forMode: .common)
+  }
+
+  @available(macOS 14.0, *)
+  private final class AnimationDisplayLinkTarget: NSObject {
+    private let tick: (CFTimeInterval) -> Void
+
+    init(tick: @escaping (CFTimeInterval) -> Void) { self.tick = tick }
+
+    @objc func advance(_ link: CADisplayLink) { tick(link.targetTimestamp) }
+  }
+
+  func stopAnimation() {
+    animationGeneration += 1
+    timer?.invalidate()
+    timer = nil
+    if #available(macOS 14.0, *) { (animationDisplayLink as? CADisplayLink)?.invalidate() }
+    animationDisplayLink = nil
+  }
+
+  func releaseNativeVideo() {
+    nativeVideo?.restore()
+    nativeVideo = nil
   }
 }
 
@@ -82,10 +810,13 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   private var pinchAnchor: NSPoint?
   private var originalVideoTransform = CATransform3DIdentity
   private var originalVideoMask: CALayer?
+  private var exitPreviewTransform: CropPreviewTransform?
   private let previewMask = CALayer()
   private var editorEventMonitor: Any?
   private var isTrackingEditorMenu = false
   private var aspectPopover: NSPopover?
+  private var entryOverlay: CropTransitionOverlay?
+  var isEntering: Bool { entryOverlay != nil }
 
   private var readableCropString: String {
     "(\(cropx), \(cropy)) (\(cropw)\u{d7}\(croph))"
@@ -200,7 +931,8 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   }
 
   func enter(mode: Mode, selectWholeVideoByDefault: Bool = false) {
-    guard !isActive, !mainWindow.isCropExitInProgress, let window = mainWindow.window else { return }
+    guard !isActive, !mainWindow.isCropTransitionInProgress, mainWindow.window != nil else { return }
+    mainWindow.prepareVideoTransformWindowReference()
     reloadAspectPresets()
     let player = mainWindow.player
     videoGeometry = (mode == .crop ? player.scopedCropPreview?.geometry : nil) ?? player.interactiveVideoGeometry(uncropped: mode == .crop)
@@ -210,9 +942,153 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     }
     let cropFilter = mode == .crop ? (player.scopedCropPreview?.filter ?? player.info.cropFilter) : nil
     let cropDescription = player.scopedCropPreview?.originalTrack.cropDescription ?? player.info.unsureCrop
+    if mode == .crop, player.scopedCropPreview == nil, player.canAnimateCropSource, mainWindow.cropTransitionDuration(0.35) > 0 {
+      prepareEntry(cropFilter: cropFilter, cropDescription: cropDescription,
+                   selectWholeVideoByDefault: selectWholeVideoByDefault)
+    } else {
+      _ = beginEditing(mode: mode, cropFilter: cropFilter, cropDescription: cropDescription,
+                       selectWholeVideoByDefault: selectWholeVideoByDefault)
+    }
+  }
+
+  private func prepareEntry(cropFilter: MPVFilter?, cropDescription: String,
+                            selectWholeVideoByDefault: Bool) {
+    let main = mainWindow!
+    main.window?.contentView?.layoutSubtreeIfNeeded()
+    let overlay = CropTransitionOverlay(frame: main.videoViewContainer.bounds)
+    overlay.wasAnimatingWindowResize = main.videoView.videoLayer.isAnimatingWindowResize
+    main.videoView.videoLayer.isInCropTransition = true
+    main.videoView.videoLayer.isAnimatingWindowResize = true
+    let (width, height) = main.player.videoSizeForDisplay
+    let frame = main.player.cropTransitionFrame(in: main.videoViewContainer.bounds)
+    overlay.playerVideoFrame = CropTransitionOverlay.fit(NSSize(width: width, height: height), in: main.videoView.frame)
+    overlay.mediaGeneration = main.player.info.trackSelectionGeneration
+    overlay.waitsForOutput = cropFilter != nil
+    let geometry = main.player.interactiveVideoGeometry(uncropped: true)
+    overlay.expectedSourceSize = geometry.sourceSize
+    overlay.showPlayerFrame(frame: frame)
+    entryOverlay = overlay
+    main.videoViewContainer.addSubview(overlay, positioned: .above, relativeTo: nil)
+    overlay.beginPreparationFeedback(pulse: !AccessibilityPreferences.motionReductionEnabled)
+    main.bindCropVideo(overlay, pixelSize: geometry.selectionSize)
+    main.videoView.videoLayer.setCropFramePreparation(true)
+    if cropFilter != nil {
+      main.player.removeCropFilter()
+      guard main.player.info.cropFilter == nil else { cancelEntryTransition(); return }
+    }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    main.videoViewContainer.addSubview(overlay, positioned: .above, relativeTo: nil)
+    let entered = beginEditing(mode: .crop, cropFilter: cropFilter, cropDescription: cropDescription,
+                               selectWholeVideoByDefault: selectWholeVideoByDefault)
+    main.videoViewContainer.addSubview(overlay, positioned: .above, relativeTo: nil)
+    // The crop box is a sibling of VideoView. Resolve their parent constraints
+    // before recording the editor viewport, including a reused crop box.
+    main.videoViewContainer.layoutSubtreeIfNeeded()
+    overlay.entryImageFrame = main.videoViewContainer.convert(cropBoxView.imageRect, from: cropBoxView)
+    overlay.entryClip = main.videoViewContainer.convert(cropBoxView.previewRect, from: cropBoxView)
+    overlay.entryControlsFrame = main.videoViewContainer.convert(controlBar.bounds, from: controlBar)
+    beginNativeExitPresentation()
+    CATransaction.commit()
+    guard entered else { cancelEntryTransition(); return }
+    overlay.isPreparing = false
+    finishEntryTransition()
+  }
+
+  func finishEntryTransition(outputIsReady: Bool = false) {
+    if let overlay = entryOverlay {
+      if outputIsReady { overlay.nativeFrameWasRendered = true }
+      mainWindow.finishPendingNativeCropFrame(overlay)
+    }
+    guard let overlay = entryOverlay, isActive, !overlay.isPreparing, !overlay.isFinishing else { return }
+    let main = mainWindow!
+    guard main.player.info.state.active,
+          main.player.info.trackSelectionGeneration == overlay.mediaGeneration else { cancelEntryTransition(); return }
+    let actual = NSSize(width: main.player.mpv.getInt(MPVProperty.videoOutParams + "/w"),
+                        height: main.player.mpv.getInt(MPVProperty.videoOutParams + "/h"))
+    guard !main.player.isRefreshingPausedCrop, actual == overlay.expectedSourceSize else { return }
+    overlay.isFinishing = true
+    let selection = cropBoxView.selectedRect
+    let anchor = selection.isEmpty ? NSRect(origin: .zero, size: cropBoxView.videoSize) : selection
+    controlBar.isHidden = false
+    let controlsImage = controlBar.bitmapImageRepForCachingDisplay(in: controlBar.bounds).map { bitmap in
+      controlBar.cacheDisplay(in: controlBar.bounds, to: bitmap)
+      let image = NSImage(size: controlBar.bounds.size)
+      image.addRepresentation(bitmap)
+      return image
+    }
+    controlBar.isHidden = true
+    main.afterNativeCropFrame(overlay, preparing: true,
+                             outputIsReady: outputIsReady || !overlay.waitsForOutput) { [weak self, weak overlay] in
+      guard let self, let overlay, entryOverlay === overlay else { return }
+      main.videoView.videoLayer.withCropFrameHandoff {
+        overlay.show(selection: anchor, sourceSize: self.cropBoxView.videoSize,
+                     initialFrame: overlay.entryImageFrame,
+                     initialClip: overlay.entryClip,
+                     initialSelection: selection, controlsImage: controlsImage,
+                     controlsFrame: overlay.entryControlsFrame, entering: true)
+        overlay.nativeVideo?.prepareRaster(for: [overlay.entryImageFrame,
+          overlay.transformedImage(fitting: overlay.playerVideoFrame)])
+        overlay.presentTransition(to: overlay.playerVideoFrame, progress: 1, outlineOpacity: 0)
+      }
+      overlay.finishPreparationFeedback { [weak self, weak overlay] in
+        guard let self, let overlay, entryOverlay === overlay else { return }
+        overlay.animate(duration: main.cropTransitionDuration(0.35), update: { [weak self, weak overlay] progress in
+          guard let self, let overlay, entryOverlay === overlay else { return }
+          overlay.presentTransition(to: overlay.playerVideoFrame, progress: 1 - progress,
+                                    outlineOpacity: max(0, (progress - 0.6) / 0.4))
+        }) { [weak self, weak overlay] in
+          guard let self, let overlay, entryOverlay === overlay else { return }
+          cancelEntryTransition()
+        }
+      }
+    }
+  }
+
+  func cancelEntryTransition() {
+    let overlay = entryOverlay
+    overlay?.stopAnimation()
+    overlay?.endPreparationFeedback(animated: false)
+    overlay?.pendingNativeFrameCompletion = nil
+    if overlay != nil { mainWindow?.videoView.videoLayer.cancelCropFrameRequests() }
+    if let overlay {
+      let restoreLayout = {
+        overlay.releaseNativeVideo()
+        self.entryOverlay = nil
+        // Publish the actual editor UI before retiring its animated counterpart.
+        // withCropFrameHandoff flushes this boundary: revealing these siblings
+        // afterwards would expose one frame with neither controls nor outline.
+        self.controlBar.isHidden = false
+        self.cropBoxView.isHidden = false
+        if self.isActive { self.layoutEditor() }
+        overlay.removeFromSuperview()
+      }
+      if isActive, mainWindow.player.info.state.active {
+        mainWindow.videoView.videoLayer.withCropFrameHandoff(restoreLayout)
+      } else {
+        mainWindow.videoView.videoLayer.withCropFrameUpdate(restoreLayout)
+        mainWindow.videoView.videoLayer.setCropFramePreparation(false)
+      }
+    }
+    controlBar.isHidden = false
+    cropBoxView.isHidden = false
+    if let overlay {
+      mainWindow?.videoView.videoLayer.isAnimatingWindowResize = overlay.wasAnimatingWindowResize
+      mainWindow?.videoView.videoLayer.isInCropTransition = false
+    }
+    if !isActive, let editorEventMonitor {
+      NSEvent.removeMonitor(editorEventMonitor)
+      self.editorEventMonitor = nil
+    }
+  }
+
+  private func beginEditing(mode: Mode, cropFilter: MPVFilter?, cropDescription: String,
+                            selectWholeVideoByDefault: Bool) -> Bool {
+    guard let window = mainWindow.window else { return false }
+    let player = mainWindow.player
     if cropFilter != nil && player.scopedCropPreview == nil {
       player.removeCropFilter()
-      guard player.info.cropFilter == nil else { return }
+      guard player.info.cropFilter == nil else { return false }
     }
 
     window.backgroundColor = .windowBackgroundColor
@@ -257,7 +1133,7 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     shadow.shadowBlurRadius = 10
     shadow.shadowColor = .black.withAlphaComponent(0.5)
     mainWindow.videoView.shadow = shadow
-    resize()
+    layoutEditor()
 
     mainWindow.videoViewContainer.addSubview(cropBoxView)
     cropBoxView.previewInset = 10
@@ -276,19 +1152,30 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     updatePreviewTransform()
     window.makeFirstResponder(cropBoxView)
     player.postNotification(.iinaTrackSettingsChanged)
-    if mode == .crop {
-      editorEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
-        guard let self else { return event }
-        return self.handleEditorEvent(event)
-      }
+    if mode == .crop { installEditorEventMonitor() }
+    return true
+  }
+
+  private func installEditorEventMonitor() {
+    guard editorEventMonitor == nil else { return }
+    editorEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+      guard let self else { return event }
+      return handleEditorEvent(event)
     }
   }
 
   func handleEditorEvent(_ event: NSEvent) -> NSEvent? {
-    guard isActive, currentMode == .crop else { return event }
     let parentModifierEvent = event.type == .flagsChanged && event.window == nil && mainWindow.window?.isKeyWindow == true
     guard event.window === mainWindow.window || parentModifierEvent else { return event }
-    if mainWindow.isCropExitInProgress { return nil }
+    let cancelsTransition = event.type == .keyDown && event.keyCode == 53 && !event.isARepeat &&
+      event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
+    if mainWindow.isCropTransitionInProgress, cancelsTransition {
+      mainWindow.cancelCropExitTransition()
+      if !isActive { return nil }
+    }
+    if isEntering { return event.modifierFlags.contains(.command) ? event : nil }
+    guard isActive, currentMode == .crop else { return event }
+    if mainWindow.isCropTransitionInProgress { return nil }
     guard !isTrackingEditorMenu else {
       // A transient popover can leave keyboard focus on its parent window.
       (aspectPopover?.contentViewController as? CropAspectPresetListController)?
@@ -317,7 +1204,11 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   }
 
   func resize() {
-    guard isActive else { return }
+    guard isActive, !mainWindow.isCropTransitionInProgress else { return }
+    layoutEditor()
+  }
+
+  private func layoutEditor() {
     mainWindow.window?.contentView?.layoutSubtreeIfNeeded()
     let containerSize = mainWindow.videoViewContainer.bounds.size
     let insets = CropEditorInsets(size: containerSize)
@@ -417,6 +1308,7 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   }
 
   func exit(applyingCrop: Bool = false, discardingCrop: Bool = false, then: @escaping () -> Void = {}) {
+    cancelEntryTransition()
     guard isActive, let window = mainWindow.window else { return }
     let popover = aspectPopover
     aspectPopover = nil
@@ -435,10 +1327,13 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     pinchAnchor = nil
     CATransaction.begin()
     CATransaction.setDisableActions(true)
-    mainWindow.videoView.layer?.transform = originalVideoTransform
-    mainWindow.videoView.layer?.mask = originalVideoMask
+    if !mainWindow.deferCropVideoRestoration(transform: originalVideoTransform, mask: originalVideoMask) {
+      mainWindow.videoView.layer?.transform = originalVideoTransform
+      mainWindow.videoView.layer?.mask = originalVideoMask
+    }
     CATransaction.commit()
     originalVideoMask = nil
+    exitPreviewTransform = nil
     cropBoxView.removeFromSuperview()
     controlBar.removeFromSuperview()
     controlBarWidth?.isActive = false
@@ -453,9 +1348,9 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
       player.info.unsureCrop = originalCropDescription
     }
     originalCropFilter = nil
-    player.postNotification(.iinaTrackSettingsChanged)
     then()
     if !discardingCrop, player.scopedCropPreview != nil { player.finishScopedCustomCrop() }
+    player.postNotification(.iinaTrackSettingsChanged)
     // A restored/applied filter will refresh geometry once mpv reports its output.
     if wasCropping, player.info.cropFilter == nil {
       mainWindow.handleVideoSizeChange(keepWindowSize: true)
@@ -718,7 +1613,6 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
           player.removeCropFilter()
           return
         }
-        player.info.unsureCrop = ""
         player.sendOSD(.crop(self.readableCropString))
       }
       return true
@@ -726,15 +1620,43 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
   }
 
   private func prepareExit(selection: NSRect, completion: @escaping () -> Bool) {
-    let image = cropBoxView.imageRect
-    let size = cropBoxView.videoSize
-    let rect = NSRect(x: image.minX + selection.minX * image.width / size.width,
-                      y: image.minY + selection.minY * image.height / size.height,
-                      width: selection.width * image.width / size.width,
-                      height: selection.height * image.height / size.height)
-    mainWindow.prepareCropExit(selection: selection, sourceSize: size,
-                               initialFrame: cropBoxView.convert(rect, to: mainWindow.videoViewContainer),
+    guard !mainWindow.isCropTransitionInProgress else { return }
+    if mainWindow.player.scopedCropPreview != nil { _ = completion(); return }
+    let container: NSView = mainWindow.videoViewContainer
+    container.layoutSubtreeIfNeeded()
+    let imageFrame = container.convert(cropBoxView.imageRect, from: cropBoxView)
+    let clip = container.convert(cropBoxView.previewRect, from: cropBoxView)
+    let controlsFrame = container.convert(controlBar.bounds, from: controlBar)
+    let controlsImage = controlBar.bitmapImageRepForCachingDisplay(in: controlBar.bounds).map { bitmap in
+      controlBar.cacheDisplay(in: controlBar.bounds, to: bitmap)
+      let image = NSImage(size: controlBar.bounds.size)
+      image.addRepresentation(bitmap)
+      return image
+    }
+    exitPreviewTransform = cropBoxView.previewTransform
+    let fromSelection = cropBoxView.beginExitPresentation()
+    mainWindow.prepareCropExit(selection: selection, sourceSize: cropBoxView.videoSize,
+                               initialFrame: imageFrame, initialClip: clip, initialSelection: fromSelection,
+                               controlsImage: controlsImage, controlsFrame: controlsFrame,
                                completion: completion)
+  }
+
+  func beginNativeExitPresentation() {
+    controlBar.isHidden = true
+    cropBoxView.isHidden = true
+    mainWindow.updateVideoViewConstraints([.top: 0, .bottom: 0, .leading: 0, .trailing: 0])
+    mainWindow.videoViewContainer.layoutSubtreeIfNeeded()
+    mainWindow.videoView.layer?.transform = originalVideoTransform
+    mainWindow.videoView.layer?.mask = originalVideoMask
+  }
+
+  func restoreExitPresentation() {
+    controlBar.isHidden = false
+    cropBoxView.isHidden = false
+    guard isActive, let preview = exitPreviewTransform else { return }
+    exitPreviewTransform = nil
+    cropBoxView.restoreExitPresentation(preview)
+    resize()
   }
 
   private func delogoAction() {
@@ -756,7 +1678,16 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     guard currentMode == .crop else { exit(); return }
     let selection = originalCropFilter.flatMap { selectionRect(for: $0) } ??
       NSRect(origin: .zero, size: cropBoxView.videoSize)
-    prepareExit(selection: selection) { [self] in exit(); return true }
+    let filter = originalCropFilter
+    let description = originalCropDescription
+    prepareExit(selection: selection) { [self] in
+      if let filter {
+        guard mainWindow.player.setCrop(fromFilter: filter) else { return false }
+        mainWindow.player.info.unsureCrop = description
+      }
+      exit(applyingCrop: true)
+      return true
+    }
   }
 }
 
@@ -1253,6 +2184,7 @@ final class CropBoxView: NSView {
   private(set) var selectedRect = NSRect()
   private var presentedSelection: NSRect?
   private var selectionTimer: Timer?
+  private var outsideOpacity: CGFloat = 0.52
   var isAnimatingSelection: Bool { selectionTimer != nil }
   var boxRect: NSRect {
     guard videoSize.width > 0, videoSize.height > 0 else { return .zero }
@@ -1346,8 +2278,25 @@ final class CropBoxView: NSView {
     window?.invalidateCursorRects(for: self)
   }
 
+  func beginExitPresentation() -> NSRect {
+    let selection = presentedSelection ?? selectedRect
+    selectionTimer?.invalidate()
+    selectionTimer = nil
+    presentedSelection = selection
+    drag = nil
+    return selection
+  }
+
+  func restoreExitPresentation(_ preview: CropPreviewTransform) {
+    previewTransform = preview
+    presentedSelection = nil
+    outsideOpacity = 0.52
+    previewDidChange()
+  }
+
   func resetPreview() {
     previewTransform = CropPreviewTransform()
+    outsideOpacity = 0.52
     previewDidChange()
   }
 
@@ -1576,7 +2525,7 @@ final class CropBoxView: NSView {
     let visibleSelection = rect.intersection(previewRect)
     if !visibleSelection.isEmpty { outside.appendRect(visibleSelection) }
     outside.windingRule = .evenOdd
-    NSColor.black.withAlphaComponent(0.52).setFill()
+    NSColor.black.withAlphaComponent(outsideOpacity).setFill()
     outside.fill()
     guard !selectedRect.isEmpty else { return }
 

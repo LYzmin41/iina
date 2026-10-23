@@ -314,17 +314,22 @@ class Titlebar: NSView {
   private func positionWindowButtons(animated: Bool) {
     for item in windowButtons {
       guard let host = item.host, item.button.superview === host else { continue }
-      item.button.setFrameOrigin(item.frame.origin)
-      item.button.wantsLayer = true
+      if item.button.frame.origin != item.frame.origin { item.button.setFrameOrigin(item.frame.origin) }
+      if !item.button.wantsLayer { item.button.wantsLayer = true }
       guard let layer = item.button.layer else { continue }
       let reduceMotion = AccessibilityPreferences.motionReductionEnabled
       let offset: CGFloat = isRevealed || reduceMotion ? 0 : headerHeightConstraint.constant
       let transform = CATransform3DMakeTranslation(0, host.isFlipped ? -offset : offset, 0)
-      let previous = layer.presentation()?.transform ?? layer.transform
-      CATransaction.begin()
-      CATransaction.setDisableActions(true)
-      layer.transform = transform
-      CATransaction.commit()
+      // A window resize usually leaves these transforms unchanged. Avoid
+      // publishing three extra transactions (and reading presentation copies)
+      // on every crop tick; a real header slide still starts where it is shown.
+      let previous = animated && !reduceMotion ? layer.presentation()?.transform ?? layer.transform : layer.transform
+      if !CATransform3DEqualToTransform(layer.transform, transform) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.transform = transform
+        CATransaction.commit()
+      }
       if animated && !reduceMotion {
         let slide = CABasicAnimation(keyPath: "transform")
         slide.fromValue = NSValue(caTransform3D: previous)
@@ -337,7 +342,8 @@ class Titlebar: NSView {
         layer.removeAnimation(forKey: "headerSlide")
         item.button.animator().alphaValue = isRevealed ? 1 : 1e-100
       } else {
-        item.button.alphaValue = isRevealed ? 1 : 1e-100
+        let opacity: CGFloat = isRevealed ? 1 : 1e-100
+        if item.button.alphaValue != opacity { item.button.alphaValue = opacity }
       }
     }
   }

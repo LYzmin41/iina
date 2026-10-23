@@ -43,24 +43,47 @@ struct WindowResizeSession {
 
   func size(at mouse: NSPoint, maximum: NSSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                                        height: CGFloat.greatestFiniteMagnitude)) -> NSSize {
-    let maximumWidth = min(maximum.width, maximum.height * aspect)
-    if horizontal {
-      let width = min(maximumWidth, max(1, initialSize.width + direction * (mouse.x - initialMouse.x)))
-      return NSSize(width: width, height: width / aspect)
+    let ratio = horizontal ? aspect : 1 / aspect
+    let initialPrimary = horizontal ? initialSize.width : initialSize.height
+    let initialSecondary = horizontal ? initialSize.height : initialSize.width
+    let primaryLimit = horizontal ? maximum.width : maximum.height
+    let secondaryLimit = horizontal ? maximum.height : maximum.width
+    let maximumPrimary = min(primaryLimit, max(initialPrimary, secondaryLimit * ratio))
+    let displacement = direction * (horizontal ? mouse.x - initialMouse.x : mouse.y - initialMouse.y)
+    let primary = min(maximumPrimary, max(1, initialPrimary + displacement))
+    let delta = primary - initialPrimary
+    let padding = initialSecondary - initialPrimary / ratio
+    var secondary = initialSecondary + delta / ratio
+    if delta > 0, padding > 0 {
+      // Keep the ungrabbed dimension until the video aspect catches up with it.
+      secondary = max(initialSecondary, primary / ratio)
+    } else if delta > 0, padding < 0 {
+      // A minimum-clamped window can start narrower on the ungrabbed axis.
+      // Consume that mismatch over the equivalent pointer distance, without
+      // moving the grabbed edge or introducing a jump on the first resize tick.
+      let progress = min(1, delta / (-padding * ratio))
+      let eased = progress * progress * (3 - 2 * progress)
+      secondary = primary / ratio + padding * (1 - eased)
     }
-    let height = min(maximumWidth / aspect, max(1, initialSize.height + direction * (mouse.y - initialMouse.y)))
-    return NSSize(width: height * aspect, height: height)
+    secondary = min(secondaryLimit, max(1, secondary))
+    return horizontal ? NSSize(width: primary, height: secondary) : NSSize(width: secondary, height: primary)
   }
 }
 
 class MainWindow: CommonWindow {
   var forceKeyAndMain = false
   override func sendEvent(_ event: NSEvent) {
-    if let controller = windowController as? MainWindowController, controller.isWindowLoaded {
-      if event.type == .keyDown, controller.handleDefaultEscape(with: event) { return }
-      if controller.sidebars.handlePanelMouseEvent(event) { return }
-      if controller.titleBarView?.handleBackgroundMouseEvent(event) == true { return }
+    guard let controller = windowController as? MainWindowController, controller.isWindowLoaded else {
+      super.sendEvent(event)
+      return
     }
+    if event.type == .leftMouseDown { controller.cancelWindowDrag() }
+    defer {
+      if event.type == .leftMouseUp { controller.cancelWindowDrag() }
+    }
+    if event.type == .keyDown, controller.handleDefaultEscape(with: event) { return }
+    if controller.sidebars.handlePanelMouseEvent(event) { return }
+    if controller.titleBarView?.handleBackgroundMouseEvent(event) == true { return }
     super.sendEvent(event)
   }
 

@@ -1,13 +1,33 @@
 import Cocoa
 import OpenGL
 import QuartzCore
+struct RenderFlag { let rawValue: UInt64 }
+let MPV_RENDER_FRAME_INFO_PRESENT = RenderFlag(rawValue: 1)
+enum RenderParamType { case nextFrameInfo }
+let MPV_RENDER_PARAM_NEXT_FRAME_INFO = RenderParamType.nextFrameInfo
+struct mpv_render_frame_info { var flags: UInt64 = 0; var target_time: Int64 = 0 }
+func mpv_get_time_ns(_ handle: Int) -> Int64 { 0 }
+struct mpv_render_param { let type: RenderParamType; let data: UnsafeMutablePointer<mpv_render_frame_info> }
+var pendingFrameFlags: UInt64 = 0
+func mpv_render_context_update(_ context: Int) -> UInt64 { 1 }
+func mpv_render_context_get_info(_ context: Int, _ param: mpv_render_param) -> Int32 { param.data.pointee.flags = pendingFrameFlags; return 0 }
 class ReadLock { var value = false; func withReadLock<T>(_ body: (Bool) -> T) -> T { body(value) } }
-class MPV { var hasFrame = false; var polls = 0; func shouldRenderUpdateFrame() -> Bool { polls += 1; return hasFrame } }
+class MPV { var mpv = 1; var mpvRenderContext: Int? = 1; var hasFrame = false; var polls = 0; func shouldRenderUpdateFrame() -> Bool { polls += 1; return hasFrame } }
 class Player { let mpv = MPV() }
 class Video { let player = Player(); let uninitialized = ReadLock() }
 class GeometryLayer: CAOpenGLLayer {
+ func deferCropDisplay(until: Int64, now: Int64) -> Bool { false }
+ var cropSurface: CropSurfaceFixture?
+ func requestCropDisplay(_ surface: CropSurfaceFixture) {}
  let videoView = Video()
  var inLiveResize = false
+ var isAnimatingWindowResize = false
+ var isDrawingGeometryHandoff = false
+ var isInCropTransition = false
+ var isHostedInPIP = false
+ var isPreparingCropFrame = false
+ var skippedEmptyCropFrame = false
+ var isInFullscreenTransition = false
  var forceDraw = false
  var lastRenderedPixelSize: CGSize?
 // PRODUCTION_GEOMETRY
@@ -57,4 +77,35 @@ for scale: CGFloat in [1, 2] {
  layer.bounds.size = .zero
  check(!canDraw(), "empty surface never renders")
 }
+let crop = GeometryLayer()
+crop.bounds = CGRect(x:0,y:0,width:800,height:450)
+crop.isInCropTransition = true; crop.forceDraw = true
+pendingFrameFlags = 0
+check(!crop.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil),
+      "crop reconfiguration cannot render mpv's empty dummy frame even with a forced draw")
+pendingFrameFlags = 1
+check(crop.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil),
+      "the first real crop frame resumes the existing native surface")
+crop.videoView.player.mpv.mpvRenderContext = nil
+check(!crop.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil),
+      "a missing render context cannot complete crop presentation")
+
+final class CropSurfaceFixture { var isCaptured = true }
+
+crop.videoView.player.mpv.mpvRenderContext = 1
+crop.isPreparingCropFrame = true
+pendingFrameFlags = 1
+check(!crop.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil), "filter handoff cannot expose a frame before projection matches its source")
+
+crop.isPreparingCropFrame = false
+check(crop.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil), "ready source projection resumes native presentation")
+let pipPaused = GeometryLayer()
+pipPaused.isHostedInPIP = true
+pipPaused.bounds = CGRect(x: 0, y: 0, width: 328, height: 185)
+pendingFrameFlags = 0
+check(pipPaused.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil), "paused PiP must redraw cached video into a fresh native surface without a queued frame")
+pipPaused.lastRenderedPixelSize = CGSize(width: 328, height: 185)
+check(!pipPaused.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil), "unchanged paused PiP does not spin")
+pipPaused.forceDraw = true
+check(pipPaused.canDraw(inCGLContext: ctx, pixelFormat: pf, forLayerTime: 0, displayTime: nil), "explicit paused PiP handoff can use the cached current frame")
 print("Passed \(checks) production geometry render checks")

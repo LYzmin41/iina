@@ -8,6 +8,7 @@
 
 import Cocoa
 import AudioToolbox
+import ImageIO
 
 private enum ScreenshotSound {
   private static let soundID: SystemSoundID? = {
@@ -17,10 +18,26 @@ private enum ScreenshotSound {
     return soundID
   }()
 
-  static func play() {
-    guard Preference.bool(for: .screenshotPlaySound), let soundID else { return }
+  static func play(enabled: Bool? = nil) {
+    guard enabled ?? Preference.bool(for: .screenshotPlaySound), let soundID else { return }
     // System Sound Services respects macOS sound-effects settings, independently of mpv volume.
     AudioServicesPlaySystemSoundWithCompletion(soundID, nil)
+  }
+}
+
+private enum ScreenshotImageDecoder {
+  static func decode(_ url: URL, enableFFmpeg: Bool) -> NSImage? {
+    autoreleasepool {
+      let options: [CFString: Any] = [kCGImageSourceShouldCacheImmediately: true,
+                                     kCGImageSourceShouldAllowFloat: true]
+      if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+         let image = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary) {
+        return NSImage(cgImage: image, size: .zero)
+      }
+      guard enableFFmpeg else { return nil }
+      Logger.log("Using FFmpeg to decode screenshot: \(url)")
+      return FFmpegController.createNSImage(withContentsOf: url)
+    }
   }
 }
 
@@ -250,6 +267,147 @@ class PlayerCore: NSObject {
   var syncUITimer: Timer?
 
   var displayOSD: Bool = true
+
+  let osdFeedbackOrigins = OSDFeedbackOrigins()
+  private var osdFeedbackOrigin = OSDFeedbackOrigin.command
+
+  var currentOSDFeedbackOrigin: OSDFeedbackOrigin { Thread.isMainThread ? osdFeedbackOrigin : .command }
+
+  @discardableResult
+  func withOSDFeedbackOrigin<T>(_ origin: OSDFeedbackOrigin, _ action: () -> T) -> T {
+    dispatchPrecondition(condition: .onQueue(.main))
+    let previous = osdFeedbackOrigin
+    osdFeedbackOrigin = origin
+    defer { osdFeedbackOrigin = previous }
+    return action()
+  }
+
+  @discardableResult
+  func performSidebarChange<T>(_ action: () -> T) -> T { withOSDFeedbackOrigin(.sidebar, action) }
+
+  func preservingOSDFeedbackOrigin<T>(_ action: @escaping () -> T) -> () -> T {
+    let origin = currentOSDFeedbackOrigin
+    return { [weak self] in
+      guard let self else { return action() }
+      return self.withOSDFeedbackOrigin(origin, action)
+    }
+  }
+
+  private enum CropRefreshUpdate: Hashable { case video, tracks, filters, videoParams }
+  private var pausedCropRefresh: (generation: Int, updates: Set<CropRefreshUpdate>, showsSeekOSD: Bool)?
+  private var videoGeometryOSDRefresh: (token: UUID, generation: Int, showsSeekOSD: Bool)?
+  private var userSeekOSDIntent: (token: UUID, generation: Int)?
+  private var startedSeekOSDIntent: UUID?
+
+  var isRefreshingPausedCrop: Bool {
+    pausedCropRefresh?.generation == info.trackSelectionGeneration && info.state.active
+  }
+
+  var shouldShowSeekOSD: Bool {
+    // mpv also seeks internally when refreshing filters or rebuilding a graph.
+    // Only a deliberate seek request should publish time/progress feedback.
+    guard info.state.active,
+          userSeekOSDIntent?.generation == info.trackSelectionGeneration else { return false }
+    let geometry = videoGeometryOSDRefresh
+    let refreshingGeometry = geometry?.generation == info.trackSelectionGeneration && info.state.active
+    return (!refreshingGeometry || geometry?.showsSeekOSD == true) &&
+      (!isRefreshingPausedCrop || pausedCropRefresh?.showsSeekOSD == true)
+  }
+
+  @discardableResult
+  func userInitiatedSeek() -> UUID {
+    let token = UUID()
+    userSeekOSDIntent = (token, info.trackSelectionGeneration)
+    pausedCropRefresh?.showsSeekOSD = true
+    if videoGeometryOSDRefresh?.generation == info.trackSelectionGeneration {
+      videoGeometryOSDRefresh?.showsSeekOSD = true
+    }
+    return token
+  }
+
+  func cancelUserInitiatedSeek(_ token: UUID) {
+    guard userSeekOSDIntent?.token == token else { return }
+    userSeekOSDIntent = nil
+    if startedSeekOSDIntent == token { startedSeekOSDIntent = nil }
+  }
+
+  func seekOSDDidStart() {
+    startedSeekOSDIntent = userSeekOSDIntent?.generation == info.trackSelectionGeneration
+      ? userSeekOSDIntent?.token : nil
+  }
+
+  func seekOSDDidRestart() {
+    // A restart from an older seek must not consume a newer pending user action.
+    if let startedSeekOSDIntent, userSeekOSDIntent?.token == startedSeekOSDIntent {
+      userSeekOSDIntent = nil
+    }
+    startedSeekOSDIntent = nil
+  }
+
+  /// Scope only unsolicited seek OSD; native seeking, playback and geometry
+  /// notifications retain their normal lifecycle. A superseding change owns a
+  /// new token, while deliberate seeking remains visible through the overlap.
+  func beginVideoGeometryOSDRefresh() -> UUID {
+    dispatchPrecondition(condition: .onQueue(.main))
+    let token = UUID()
+    let generation = info.trackSelectionGeneration
+    let inheritedIntent = videoGeometryOSDRefresh?.generation == generation &&
+      videoGeometryOSDRefresh?.showsSeekOSD == true
+    let explicitIntent = userSeekOSDIntent?.generation == generation
+    videoGeometryOSDRefresh = (token, generation, inheritedIntent || explicitIntent)
+    return token
+  }
+
+  func endVideoGeometryOSDRefresh(_ token: UUID) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let refresh = videoGeometryOSDRefresh, refresh.token == token else { return }
+    // The ready frame can reach main before the event reader has dispatched its
+    // preceding refresh SEEK. Drain those events before releasing this scope.
+    mpv.afterPendingEvents { [weak self] in
+      guard let self, self.videoGeometryOSDRefresh?.token == token,
+            self.info.trackSelectionGeneration == refresh.generation else { return }
+      self.videoGeometryOSDRefresh = nil
+    }
+  }
+
+  private func cancelVideoGeometryOSDRefresh() {
+    osdFeedbackOrigins.reset()
+    videoGeometryOSDRefresh = nil
+    userSeekOSDIntent = nil
+    startedSeekOSDIntent = nil
+  }
+
+  private func beginPausedCropRefresh() {
+    guard info.state == .paused else { return }
+    if !isRefreshingPausedCrop {
+      pausedCropRefresh = (info.trackSelectionGeneration, [],
+                           userSeekOSDIntent?.generation == info.trackSelectionGeneration)
+    }
+    mainWindow.videoView.displayActive()
+  }
+
+  func requestNativeCropFrame() {
+    guard info.state.active else { return }
+    // A filter mutation already refreshes paused video. Seeking here repeats
+    // that decode after playback-restart, delaying both native handoffs.
+    mainWindow.videoView.videoLayer.update(force: true)
+  }
+
+  private func deferCropRefreshUpdate(_ update: CropRefreshUpdate) -> Bool {
+    guard isRefreshingPausedCrop else { return false }
+    pausedCropRefresh?.updates.insert(update)
+    return true
+  }
+
+  private func finishPausedCropRefresh() {
+    let refresh = pausedCropRefresh
+    pausedCropRefresh = nil
+    guard let refresh, refresh.generation == info.trackSelectionGeneration, info.state.active else { return }
+    if refresh.updates.contains(.video) { onVideoReconfig(outputIsReady: true) }
+    if refresh.updates.contains(.tracks) { trackListChanged() }
+    if refresh.updates.contains(.filters) { vfChanged() }
+    if refresh.updates.contains(.videoParams) { videoParamsChanged() }
+  }
 
   var isInMiniPlayer = false
   /// Set this to `true` if user changes "music mode" status manually. This disables `autoSwitchToMusicMode`
@@ -747,6 +905,8 @@ class PlayerCore: NSObject {
   ///     task is still running this method only changes the player state. When the background task ends it will notice that shutting
   ///     down was in progress and will call this method again to continue the process of shutting down..
   func shutdown() {
+    cancelVideoGeometryOSDRefresh()
+    cancelScreenshotRequests()
     info.state = .shuttingDown
     guard !backgroundTaskInUse else { return }
     log("Shutting down")
@@ -773,6 +933,8 @@ class PlayerCore: NSObject {
   ///     windows of vulnerability that can not be fully closed. IINA has no choice but to support a mpv initiated shutdown as best it
   ///     can.
   func mpvHasShutdown() {
+    cancelVideoGeometryOSDRefresh()
+    cancelScreenshotRequests(close: true)
     let isMPVInitiated = info.state != .shuttingDown
     let suffix = isMPVInitiated ? " (initiated by mpv)" : ""
     log("Player has shutdown\(suffix)")
@@ -986,6 +1148,9 @@ class PlayerCore: NSObject {
   ///     and call this method again to continue the process of stopping. It is important to stop the background task as if it is still
   ///     running when the mpv core is shutdown it may call into mpv triggering a crash.
   func stop() {
+    cancelVideoGeometryOSDRefresh()
+    cancelScreenshotRequests()
+    pausedCropRefresh = nil
     guard info.state != .shutDown else { return }
     savePlaybackPosition()
 
@@ -1028,6 +1193,7 @@ class PlayerCore: NSObject {
   }
 
   func seek(percent: Double, forceExact: Bool = false) {
+    userInitiatedSeek()
     var percent = percent
     // mpv will play next file automatically when seek to EOF.
     // We clamp to a Range to ensure that we don't try to seek to 100%.
@@ -1042,6 +1208,7 @@ class PlayerCore: NSObject {
   }
 
   func seek(relativeSecond: Double, option: Preference.SeekOption) {
+    userInitiatedSeek()
     switch option {
 
     case .relative:
@@ -1067,10 +1234,12 @@ class PlayerCore: NSObject {
   }
 
   func seek(absoluteSecond: Double) {
+    userInitiatedSeek()
     mpv.command(.seek, args: ["\(absoluteSecond)", "absolute+exact"])
   }
 
   func frameStep(backwards: Bool) {
+    if backwards { userInitiatedSeek() }
     // When playback is paused the display link is stopped in order to avoid wasting energy on
     // It must be running when stepping to avoid slowdowns caused by mpv waiting for IINA to call
     // mpv_render_report_swap.
@@ -1081,6 +1250,38 @@ class PlayerCore: NSObject {
       mpv.command(.frameStep)
     }
   }
+
+  private final class ScreenshotRequest {
+    let id: UInt64
+    let generation: Int
+    let mediaURL: URL?
+    let saveToFile: Bool
+    let copyToClipboard: Bool
+    let showPreview: Bool
+    let playSound: Bool
+    let enableFFmpeg: Bool
+    var feedback: UUID?
+    var outputURL: URL?
+    var receivedReply = false
+    var cancelled = false
+    var savedFileSoundHandled = false
+
+    init(id: UInt64, generation: Int, mediaURL: URL?, feedback: UUID) {
+      self.id = id
+      self.generation = generation
+      self.mediaURL = mediaURL
+      self.feedback = feedback
+      saveToFile = Preference.bool(for: .screenshotSaveToFile)
+      copyToClipboard = Preference.bool(for: .screenshotCopyToClipboard)
+      showPreview = Preference.bool(for: .screenshotShowPreview)
+      playSound = Preference.bool(for: .screenshotPlaySound)
+      enableFFmpeg = Preference.bool(for: .enableFFmpegImageDecoder)
+    }
+  }
+
+  private static let screenshotQueue = DispatchQueue(label: "com.colliderli.iina.screenshot", qos: .userInitiated)
+  private var screenshotRequestSequence: UInt64 = 0
+  private var screenshotRequests: [UInt64: ScreenshotRequest] = [:]
 
   /// Takes a screenshot, attempting to augment mpv's `screenshot` command with additional functionality & control, for example
   /// the ability to save to clipboard instead of or in addition to file, and displaying the screenshot's thumbnail via the OSD.
@@ -1103,6 +1304,7 @@ class PlayerCore: NSObject {
   /// `Preference.Key.screenshotIncludeSubtitle` to decide between `subtitles` or `video`.
   @discardableResult
   func screenshot(fromKeyBinding keyBinding: KeyMapping? = nil) -> Bool {
+    dispatchPrecondition(condition: .onQueue(.main))
     let saveToFile = Preference.bool(for: .screenshotSaveToFile)
     let saveToClipboard = Preference.bool(for: .screenshotCopyToClipboard)
     guard saveToFile || saveToClipboard else {
@@ -1110,7 +1312,7 @@ class PlayerCore: NSObject {
       return false
     }
 
-    guard !info.activeTrackIDs(.video).isEmpty else {
+    guard info.state.loaded, !info.activeTrackIDs(.video).isEmpty else {
       log("Ignoring screenshot request: no video stream is being played", level: .warning)
       return false
     }
@@ -1156,70 +1358,122 @@ class PlayerCore: NSObject {
       commandFlags.append(includeSubtitles ? "subtitles" : "video")
     }
 
-    mpv.asyncCommand(.screenshot, args: commandFlags, replyUserdata: MPVController.UserData.screenshot)
-    return true
-  }
-
-  /// Initializes and returns an image object with the contents of the specified URL.
-  ///
-  /// At this time, the normal [NSImage](https://developer.apple.com/documentation/appkit/nsimage/1519907-init)
-  /// initializer will fail to create an image object if the image file was encoded in [JPEG XL](https://jpeg.org/jpegxl/) format.
-  /// In older versions of macOS this will also occur if the image file was encoded in [WebP](https://en.wikipedia.org/wiki/WebP/)
-  /// format. As these are supported formats for screenshots this method will fall back to using FFmpeg to create the `NSImage` if
-  /// the normal initializer fails to return an object.
-  /// - Parameter url: The URL identifying the image.
-  /// - Returns: An initialized `NSImage` object or `nil` if the method cannot create an image representation from the contents
-  ///       of the specified URL.
-  private func createImage(_ url: URL) -> NSImage? {
-    if let image = NSImage(contentsOf: url) {
-      return image
+    guard screenshotRequestSequence < MPVController.UserData.screenshotSequenceMask else { return false }
+    screenshotRequestSequence += 1
+    let id = MPVController.UserData.screenshot | screenshotRequestSequence
+    let request = ScreenshotRequest(id: id, generation: info.trackSelectionGeneration,
+                                    mediaURL: info.currentURL, feedback: mainWindow.beginOperationFeedback())
+    screenshotRequests[id] = request
+    let status = mpv.asyncCommand(.screenshot, args: commandFlags, checkError: false, replyUserdata: id)
+    if status < 0 {
+      // Failed submission has no COMMAND_REPLY, so release feedback here.
+      screenshotCallback(requestID: id, error: status, fileURL: nil)
     }
-    // The following internal property was added to provide a way to disable the FFmpeg image
-    // decoder should a problem be discovered by users running old versions of macOS.
-    guard Preference.bool(for: .enableFFmpegImageDecoder) else { return nil }
-    Logger.log("Using FFmpeg to decode screenshot: \(url)")
-    return FFmpegController.createNSImage(withContentsOf: url)
+    return status >= 0
   }
 
-  func screenshotCallback() {
-    let saveToFile = Preference.bool(for: .screenshotSaveToFile)
-    let saveToClipboard = Preference.bool(for: .screenshotCopyToClipboard)
-    guard saveToFile || saveToClipboard else { return }
-    log("Screenshot done: saveToFile=\(saveToFile), saveToClipboard=\(saveToClipboard)", level: .verbose)
+  private func isCurrentScreenshotRequest(_ request: ScreenshotRequest) -> Bool {
+    !request.cancelled && info.state.loaded && info.trackSelectionGeneration == request.generation
+      && info.currentURL == request.mediaURL
+  }
 
-    guard let imageFolder = mpv.getString(MPVOption.Screenshot.screenshotDir) else { return }
-    guard let lastScreenshotURL = Utility.getLatestScreenshot(from: imageFolder) else { return }
-    if saveToFile { ScreenshotSound.play() }
-    guard let image = createImage(lastScreenshotURL) else {
-      self.sendOSD(.screenshot)
-      if !saveToFile {
-        try? FileManager.default.removeItem(at: lastScreenshotURL)
-      }
+  private static func removeTemporaryScreenshot(_ url: URL?) {
+    guard let url else { return }
+    screenshotQueue.async {
+      let cache = Utility.screenshotCacheURL.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+      let path = url.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+      // Never delete saved files or another destination inferred from directory ordering.
+      guard path.count > cache.count, Array(path.prefix(cache.count)) == cache else { return }
+      try? FileManager.default.removeItem(at: url)
+    }
+  }
+
+  private func finishScreenshotRequest(_ request: ScreenshotRequest) {
+    guard screenshotRequests.removeValue(forKey: request.id) != nil else { return }
+    if let feedback = request.feedback { mainWindow?.endOperationFeedback(feedback) }
+    request.feedback = nil
+    if !request.saveToFile { Self.removeTemporaryScreenshot(request.outputURL) }
+  }
+
+  func cancelScreenshotRequests(close: Bool = false) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    for request in Array(screenshotRequests.values) {
+      request.cancelled = true
+      if let feedback = request.feedback { mainWindow?.endOperationFeedback(feedback) }
+      request.feedback = nil
+      // Keep pending IDs until their reply identifies a temporary output. At
+      // core shutdown no more replies are possible; workers own their URL copies.
+      if close { finishScreenshotRequest(request) }
+    }
+  }
+
+  func screenshotCallback(requestID: UInt64, error: Int32, fileURL: URL?) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let request = screenshotRequests[requestID], !request.receivedReply else { return }
+    request.receivedReply = true
+    request.outputURL = fileURL
+    guard isCurrentScreenshotRequest(request) else { finishScreenshotRequest(request); return }
+    guard error >= 0 else {
+      finishScreenshotRequest(request)
+      log("Cannot take a screenshot, mpv API error: \(error)", level: .error)
+      Utility.showAlert("screenshot.error_taking")
       return
     }
-    if saveToClipboard {
+    guard let fileURL else {
+      finishScreenshotRequest(request)
+      log("Screenshot reply did not include its output filename", level: .error)
+      return
+    }
+    let needsImage = request.copyToClipboard || request.showPreview
+    let enableFFmpeg = request.enableFFmpeg
+    let temporary = !request.saveToFile
+    Self.screenshotQueue.async { [weak self] in
+      let exists = FileManager.default.fileExists(atPath: fileURL.path)
+      if exists && !temporary {
+        // Saving has already succeeded. Preserve its immediate shutter feedback
+        // while an optional high-resolution preview decodes independently.
+        DispatchQueue.main.async { [weak self] in self?.screenshotFileReady(requestID: requestID) }
+      }
+      let image = exists && needsImage ? ScreenshotImageDecoder.decode(fileURL, enableFFmpeg: enableFFmpeg) : nil
+      DispatchQueue.main.async { [weak self] in
+        guard let self else {
+          if temporary { Self.removeTemporaryScreenshot(fileURL) }
+          return
+        }
+        guard let current = self.screenshotRequests[requestID] else {
+          if temporary { Self.removeTemporaryScreenshot(fileURL) }
+          return
+        }
+        self.finishDecodedScreenshot(current, fileExists: exists, image: image)
+      }
+    }
+  }
+
+  private func screenshotFileReady(requestID: UInt64) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let request = screenshotRequests[requestID], isCurrentScreenshotRequest(request),
+          request.saveToFile, !request.savedFileSoundHandled else { return }
+    request.savedFileSoundHandled = true
+    ScreenshotSound.play(enabled: request.playSound)
+  }
+
+  private func finishDecodedScreenshot(_ request: ScreenshotRequest, fileExists: Bool, image: NSImage?) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    defer { finishScreenshotRequest(request) }
+    guard isCurrentScreenshotRequest(request), fileExists else { return }
+    if request.copyToClipboard, let image {
       NSPasteboard.general.clearContents()
       let copiedToClipboard = NSPasteboard.general.writeObjects([image])
-      if copiedToClipboard && !saveToFile { ScreenshotSound.play() }
+      if copiedToClipboard && !request.saveToFile { ScreenshotSound.play(enabled: request.playSound) }
     }
-    guard Preference.bool(for: .screenshotShowPreview) else {
-      self.sendOSD(.screenshot)
-      if !saveToFile {
-        try? FileManager.default.removeItem(at: lastScreenshotURL)
-      }
+    guard request.showPreview, let image else {
+      sendOSD(.screenshot)
       return
     }
-
-    DispatchQueue.main.async {
-      let osdView = ScreenshootOSDView()
-      osdView.setImage(image,
-                       size: image.size.shrink(toSize: NSSize(width: 300, height: 200)),
-                       fileURL: saveToFile ? lastScreenshotURL : nil)
-      self.sendOSD(.screenshot, forcedTimeout: 5, accessoryView: osdView.view, context: osdView)
-      if !saveToFile {
-        try? FileManager.default.removeItem(at: lastScreenshotURL)
-      }
-    }
+    let osdView = ScreenshootOSDView()
+    osdView.setImage(image, size: image.size.shrink(toSize: NSSize(width: 300, height: 200)),
+                     fileURL: request.saveToFile ? request.outputURL : nil)
+    sendOSD(.screenshot, forcedTimeout: 5, accessoryView: osdView.view, context: osdView)
   }
 
   /// Invoke the [mpv](https://mpv.io/manual/stable/) A-B loop command.
@@ -1408,7 +1662,8 @@ class PlayerCore: NSObject {
     result.aspectDescription = MediaVideoGeometryState.aspectDescription(
       for: mpv.getDouble(MPVOption.Video.videoAspectOverride), preferred: info.unsureAspect)
     if let crop = filters.first(where: { $0.label == Constants.FilterName.crop }) {
-      result.cropDescription = info.cropFilter?.isEqual(crop) == true ? info.unsureCrop : ""
+      result.cropDescription = info.cropFilter?.isEqual(crop) == true &&
+        !["", "None"].contains(info.unsureCrop) ? info.unsureCrop : "Custom"
     }
     result.video = scopedTrackSettings.video
     result.videoTarget = scopedTrackSettings.target(.videoGeometry)
@@ -1474,7 +1729,9 @@ class PlayerCore: NSObject {
       for: mpv.getDouble(MPVOption.Video.videoAspectOverride), preferred: aspect)
     info.rotation = mpv.getInt(MPVOption.Video.videoRotate)
     reloadSavedIINAfilters()
-    if info.cropFilter != nil, let crop { info.unsureCrop = crop }
+    if info.cropFilter != nil, let crop {
+      info.unsureCrop = ["", "None"].contains(crop) ? "Custom" : crop
+    }
   }
 
   private func restoreVideoTrackGeometryForCurrentMedia() {
@@ -1814,24 +2071,35 @@ class PlayerCore: NSObject {
   }
 
   func setVideoAspect(_ aspect: String) {
+    let retry: () -> Void = preservingOSDFeedbackOrigin { [weak self] in self?.setVideoAspect(aspect) }
+    if mainWindow?.enqueueVideoGeometryChange(.aspect, request: retry) == true { return }
+    mainWindow?.prepareVideoTransformWindowReference()
     let components = aspect.components(separatedBy: ":").compactMap(Double.init)
     let valid = Regex.aspect.matches(aspect) && components.count == 2 &&
       components.allSatisfy { $0.isFinite && $0 > 0 } && (components[0] / components[1]).isFinite
     let ratio = valid ? components[0] / components[1] : -1
-    if abs(mpv.getDouble(MPVOption.Video.videoAspectOverride) - ratio) > 0.000001 {
-      mainWindow?.beginVideoAspectTransition()
+    guard abs(mpv.getDouble(MPVOption.Video.videoAspectOverride) - ratio) > 0.000001 else {
+      info.unsureAspect = valid ? aspect : "Default"; return
     }
-    guard mpv.setString(MPVOption.Video.videoAspectOverride, valid ? aspect : "-1") >= 0 else {
-      mainWindow?.finishVideoAspectTransition()
-      return
+    let apply = preservingOSDFeedbackOrigin { [weak self] () -> Bool in
+      guard let self, mpv.setString(MPVOption.Video.videoAspectOverride, valid ? aspect : "-1") >= 0 else { return false }
+      info.unsureAspect = valid ? aspect : "Default"
+      return true
     }
-    info.unsureAspect = valid ? aspect : "Default"
+    if let mainWindow { mainWindow.performVideoGeometryChange(.aspect, apply: apply) } else { _ = apply() }
   }
 
   func setVideoRotate(_ degree: Int) {
     guard AppData.rotations.contains(degree) else { return }
-    if mpv.getInt(MPVOption.Video.videoRotate) != degree { mainWindow?.beginVideoAspectTransition() }
-    mpv.setInt(MPVOption.Video.videoRotate, degree)
+    let retry: () -> Void = preservingOSDFeedbackOrigin { [weak self] in self?.setVideoRotate(degree) }
+    if mainWindow?.enqueueVideoGeometryChange(.rotation, request: retry) == true { return }
+    mainWindow?.prepareVideoTransformWindowReference()
+    guard mpv.getInt(MPVOption.Video.videoRotate) != degree else { return }
+    let apply = preservingOSDFeedbackOrigin { [weak self] () -> Bool in
+      guard let self else { return false }
+      return mpv.setString(MPVOption.Video.videoRotate, String(degree)) >= 0
+    }
+    if let mainWindow { mainWindow.performVideoGeometryChange(.rotation, apply: apply) } else { _ = apply() }
   }
 
   func setFlip(_ enable: Bool) {
@@ -2201,9 +2469,10 @@ class PlayerCore: NSObject {
   func playChapter(_ pos: Int) -> MPVChapter? {
     log("Seeking to chapter \(pos)", level: .verbose)
     let chapters = info.chapters
-    guard pos < chapters.count else {
+    guard pos >= 0, pos < chapters.count else {
       return nil
     }
+    userInitiatedSeek()
     let chapter = chapters[pos]
     mpv.command(.seek, args: ["\(chapter.time.second)", "absolute"])
     resume()
@@ -2213,6 +2482,7 @@ class PlayerCore: NSObject {
   }
 
   func setCrop(fromString str: String) {
+    mainWindow?.prepareVideoTransformWindowReference()
     if let aspect = Aspect(string: str) {
       // Match Custom Crop's rotated output coordinates; file metadata may describe another video track.
       let geometry = interactiveVideoGeometry(uncropped: true)
@@ -2227,25 +2497,146 @@ class PlayerCore: NSObject {
       let vf = MPVFilter.crop(w: Int(cropped.width), h: Int(cropped.height),
                               x: Int(cropped.minX), y: Int(cropped.minY), exact: true)
       vf.label = Constants.FilterName.crop
-      if setCrop(fromFilter: vf) { info.unsureCrop = str }
+      applyCropChange(vf, description: str, outputSize: NSSize(width: Int(cropped.width), height: Int(cropped.height)))
     } else {
-      removeCropFilter()
+      applyCropChange(nil, description: "None", outputSize: nil)
     }
+  }
+
+  private func applyCropChange(_ filter: MPVFilter?, description: String, outputSize: NSSize?) {
+    let apply = preservingOSDFeedbackOrigin { [weak self] in
+      guard let self else { return }
+      if let filter {
+        if setCrop(fromFilter: filter) { info.unsureCrop = description }
+      } else {
+        removeCropFilter()
+      }
+      postNotification(.iinaTrackSettingsChanged)
+    }
+    let size = outputSize ?? interactiveVideoGeometry(uncropped: true).sourceSize
+    let current = NSSize(width: mpv.getInt(MPVProperty.videoOutParams + "/w"),
+                         height: mpv.getInt(MPVProperty.videoOutParams + "/h"))
+    let labels = [Constants.FilterName.crop, Constants.FilterName.flip, Constants.FilterName.mirror]
+    let graph = mpv.getString("lavfi-complex") ?? ""
+    // The persistent audio mixer does not change video geometry or readiness.
+    let hasIndependentVideo = graph.isEmpty || graph == ownedTrackGraph && !graph.contains("[vo]")
+    // Size-preserving graphs have no output-size event to release this bridge.
+    if size != current || mainWindow?.isPlayerCropTransitionInProgress == true, size.width > 0, size.height > 0,
+       mpv.getFilters(MPVProperty.vf).allSatisfy({ $0.label.map(labels.contains) == true }),
+       hasIndependentVideo,
+       mainWindow?.prepareCropChange(apply,
+         selection: cropTransitionSelection(filter), displaySize: cropTransitionDisplaySize(filter),
+         filterRect: cropTransitionFilterRect(filter)) == true { return }
+    if mainWindow?.isPlayerCropTransitionInProgress == true { mainWindow?.cancelCropExitTransition() }
+    apply()
+  }
+
+  var canAnimateCropSource: Bool {
+    let graph = mpv.getString("lavfi-complex") ?? ""
+    let centered = ["video-zoom", "video-pan-x", "video-pan-y", "panscan", "video-rotate",
+                    "video-align-x", "video-align-y", "video-margin-ratio-left", "video-margin-ratio-right",
+                    "video-margin-ratio-top", "video-margin-ratio-bottom"].allSatisfy { abs(mpv.getDouble($0)) < 0.000001 }
+    return centered && mpv.getDouble("video-aspect-override") <= 0
+      && abs(mpv.getDouble("video-scale-x") - 1) < 0.000001 && abs(mpv.getDouble("video-scale-y") - 1) < 0.000001
+      && (mpv.getString("video-crop") ?? "").isEmpty && (mpv.getString("video-unscaled") ?? "no") == "no"
+      && mpv.getFilters(MPVProperty.vf).allSatisfy { $0.label == Constants.FilterName.crop }
+      && (graph.isEmpty || graph == ownedTrackGraph && !graph.contains("[vo]"))
+  }
+
+  /// Aspect and quarter-turn transitions compensate the current output geometry,
+  /// so an existing aspect override or rotation is a valid starting point.
+  var canAnimateVideoGeometry: Bool {
+    let graph = mpv.getString("lavfi-complex") ?? ""
+    let centered = ["video-zoom", "video-pan-x", "video-pan-y", "panscan",
+                    "video-align-x", "video-align-y", "video-margin-ratio-left", "video-margin-ratio-right",
+                    "video-margin-ratio-top", "video-margin-ratio-bottom"].allSatisfy { abs(mpv.getDouble($0)) < 0.000001 }
+    return centered && [0, 90, 180, 270].contains(mpv.getInt(MPVOption.Video.videoRotate))
+      && abs(mpv.getDouble("video-scale-x") - 1) < 0.000001 && abs(mpv.getDouble("video-scale-y") - 1) < 0.000001
+      && (mpv.getString("video-crop") ?? "").isEmpty && (mpv.getString("video-unscaled") ?? "no") == "no"
+      && mpv.getFilters(MPVProperty.vf).allSatisfy { $0.label == Constants.FilterName.crop }
+      && (graph.isEmpty || graph == ownedTrackGraph && !graph.contains("[vo]"))
+  }
+
+  var defaultVideoPixelAspect: Double {
+    let container = info.videoTracks.first { $0.id == info.vid }?.demuxPixelAspect ?? 0
+    let decoded = mpv.getDouble("video-dec-params/par")
+    return container.isFinite && container > 0 ? container : decoded.isFinite && decoded > 0 ? decoded : 1
+  }
+
+  var defaultVideoRotation: Int {
+    let decoded = mpv.getInt("video-dec-params/rotate")
+    if decoded != 0 { return decoded }
+    let tracks = mpv.getNode(MPVProperty.trackList) as? [[String: Any]] ?? []
+    return tracks.first { $0["type"] as? String == "video" && $0["id"] as? Int == info.vid }?["demux-rotation"] as? Int ?? 0
+  }
+
+  func cropTransitionFrame(in bounds: NSRect) -> CropTransitionOverlay.PlayerFrame? {
+    // These options move pixels independently of the crop's source coordinates.
+    guard canAnimateCropSource, !bounds.isEmpty, info.flipFilter == nil, info.mirrorFilter == nil,
+          [MPVOption.Video.videoZoom, MPVOption.Video.videoPanX, MPVOption.Video.videoPanY,
+           MPVOption.Video.panscan, MPVOption.Video.videoRotate].allSatisfy({ abs(mpv.getDouble($0)) < 0.000001 }),
+          mpv.getDouble(MPVOption.Video.videoAspectOverride) <= 0 else { return nil }
+    let geometry = interactiveVideoGeometry(uncropped: true)
+    let display = interactiveVideoGeometry(uncropped: false).displaySize
+    guard geometry.selectionSize.width > 0, geometry.selectionSize.height > 0,
+          display.width > 0, display.height > 0,
+          [0, 90, 180, 270].contains(geometry.rotation) else { return nil }
+    let normalized = cropTransitionSelection(info.cropFilter)
+    guard !normalized.isEmpty else { return nil }
+    return CropTransitionOverlay.PlayerFrame(selection: normalized,
+                                             videoRect: CropTransitionOverlay.fit(display, in: bounds), viewport: bounds)
+  }
+
+  private func cropTransitionSelection(_ filter: MPVFilter?) -> NSRect {
+    let geometry = interactiveVideoGeometry(uncropped: true)
+    let rect = cropTransitionFilterRect(filter)
+    guard !rect.isEmpty, NSRect(origin: .zero, size: geometry.sourceSize).contains(rect),
+          geometry.selectionSize.width > 0, geometry.selectionSize.height > 0 else { return .zero }
+    let selected = geometry.selectionRect(forFilterRect: rect)
+    return NSRect(x: selected.minX / geometry.selectionSize.width,
+                  y: selected.minY / geometry.selectionSize.height,
+                  width: selected.width / geometry.selectionSize.width,
+                  height: selected.height / geometry.selectionSize.height)
+  }
+
+  private func cropTransitionDisplaySize(_ filter: MPVFilter?) -> NSSize {
+    let geometry = interactiveVideoGeometry(uncropped: true)
+    let selected = cropTransitionSelection(filter)
+    return NSSize(width: selected.width * geometry.displaySize.width,
+                  height: selected.height * geometry.displaySize.height)
+  }
+
+  private func cropTransitionFilterRect(_ filter: MPVFilter?) -> NSRect {
+    let size = interactiveVideoGeometry(uncropped: true).sourceSize
+    guard let filter else { return NSRect(origin: .zero, size: size) }
+    guard let params = filter.params, let width = params["w"].flatMap(Int.init),
+          let height = params["h"].flatMap(Int.init), width > 0, height > 0 else { return .zero }
+    return NSRect(x: params["x"].flatMap(Int.init) ?? Int((size.width - CGFloat(width)) / 2),
+                  y: params["y"].flatMap(Int.init) ?? Int((size.height - CGFloat(height)) / 2),
+                  width: width, height: height)
   }
 
   @discardableResult
   func setCrop(fromFilter filter: MPVFilter) -> Bool {
     filter.label = Constants.FilterName.crop
-    guard addVideoFilter(filter) else { return false }
+    beginPausedCropRefresh()
+    guard addVideoFilter(filter) else { finishPausedCropRefresh(); return false }
     info.cropFilter = filter
+    info.unsureCrop = "Custom"
     return true
   }
 
   /// Remove the crop filter managed by IINA.
   func removeCropFilter() {
-    if let vf = info.cropFilter, removeVideoFilter(vf) {
-      info.cropFilter = nil
-      info.unsureCrop = "None"
+    mainWindow?.prepareVideoTransformWindowReference()
+    if let vf = info.cropFilter {
+      beginPausedCropRefresh()
+      if removeVideoFilter(vf) {
+        info.cropFilter = nil
+        info.unsureCrop = "None"
+      } else {
+        finishPausedCropRefresh()
+      }
     }
   }
 
@@ -2643,6 +3034,9 @@ class PlayerCore: NSObject {
   /// - Important: The event may be received after IINA has started to stop and shutdown the core. The event must be ignored if
   ///         the player is no longer active.
   func fileStarted(path: String) {
+    cancelVideoGeometryOSDRefresh()
+    cancelScreenshotRequests()
+    pausedCropRefresh = nil
     mainWindow?.cancelCropExitTransition()
     guard info.state.active else { return }
     log("File started")
@@ -2825,6 +3219,8 @@ class PlayerCore: NSObject {
   }
 
   func fileEnded(_ dueToStopCommand: Bool) {
+    cancelVideoGeometryOSDRefresh()
+    pausedCropRefresh = nil
     // if receive end-file when loading file, might be error
     // wait for idle
     if info.state == .loading || info.state == .starting {
@@ -2853,7 +3249,7 @@ class PlayerCore: NSObject {
     mainWindow?.volumeSlider.isHidden = !hasAudio
     postNotification(.iinaAIDChanged)
     if info.mixedAudioTrackIDs.count > 1 {
-      sendOSD(.custom(String(format: NSLocalizedString("track.audio_mix_count", comment: "Active audio tracks"), info.mixedAudioTrackIDs.count)))
+      if currentOSDFeedbackOrigin != .sidebar { sendOSD(.custom(String(format: NSLocalizedString("track.audio_mix_count", comment: "Active audio tracks"), info.mixedAudioTrackIDs.count))) }
     } else {
       let track = info.currentTrack(.audio) ?? .noneAudioTrack
       let position = info.orderedTrackList(.audio).firstIndex { $0.id == track.id }.map { $0 + 1 }
@@ -3003,7 +3399,9 @@ class PlayerCore: NSObject {
   }
 
   func playbackRestarted() {
-    mainWindow?.finishCropExitTransition()
+    finishPausedCropRefresh()
+    mainWindow?.finishCropExitTransition(outputIsReady: true)
+    mainWindow?.geometryVideoOutputDidChange(outputIsReady: true)
     mainWindow?.finishVideoAspectTransition()
     log("Playback restarted")
 
@@ -3124,6 +3522,7 @@ class PlayerCore: NSObject {
     // list changes if mpv is terminating as accessing mpv once shutdown has been initiated can
     // trigger a crash.
     guard info.state.active else { return }
+    guard !deferCropRefreshUpdate(.tracks) else { return }
     log("Track list changed")
     getTrackInfo()
     getSelectedTracks()
@@ -3163,9 +3562,14 @@ class PlayerCore: NSObject {
     postNotification(.iinaTracklistChanged)
   }
 
-  func onVideoReconfig() {
+  func videoOutputSizeChanged() {
+    guard mainWindow?.isCropTransitionInProgress == true else { return }
+    onVideoReconfig(outputIsReady: true)
+  }
+
+  func onVideoReconfig(outputIsReady: Bool = false) {
     // If loading file, video reconfig can return 0 width and height
-    guard info.state.loaded else { return }
+    guard info.state.loaded, !deferCropRefreshUpdate(.video) else { return }
     var dwidth = mpv.getInt(MPVProperty.dwidth)
     var dheight = mpv.getInt(MPVProperty.dheight)
     if info.rotation == 90 || info.rotation == 270 {
@@ -3179,11 +3583,18 @@ class PlayerCore: NSObject {
       info.displayHeight = dheight
       notifyWindowVideoSizeChanged()
     }
+    mainWindow?.finishCropExitTransition(outputIsReady: outputIsReady)
+    mainWindow?.geometryVideoOutputDidChange()
   }
 
   func vfChanged() {
-    guard info.state.active else { return }
+    guard info.state.active, !deferCropRefreshUpdate(.filters) else { return }
     postNotification(.iinaVFChanged)
+  }
+
+  func videoParamsChanged() {
+    guard info.state.active, !deferCropRefreshUpdate(.videoParams) else { return }
+    postNotification(.iinaVideoParamsChanged)
   }
 
   func vidChanged() {
@@ -3197,7 +3608,7 @@ class PlayerCore: NSObject {
       let position = info.orderedTrackList(.video).firstIndex { $0.id == track.id }.map { $0 + 1 }
       sendOSD(.track(track, position: position))
     } else {
-      sendOSD(.custom(String(format: NSLocalizedString("track.video_layer_count", comment: "Active video layers"), info.layeredVideoTrackIDs.count)))
+      if currentOSDFeedbackOrigin != .sidebar { sendOSD(.custom(String(format: NSLocalizedString("track.video_layer_count", comment: "Active video layers"), info.layeredVideoTrackIDs.count))) }
     }
     if isInMiniPlayer {
       miniPlayer.refreshArtworkVisibility()
@@ -3208,7 +3619,8 @@ class PlayerCore: NSObject {
 
   func windowScaleChanged() {
     // Loading/watch-later notifications may still carry the previous file's scale or dimensions.
-    guard mainWindow.loaded, info.state.loaded, !info.justStartedFile, !info.justOpenedFile else { return }
+    guard mainWindow.loaded, info.state.loaded, !info.justStartedFile, !info.justOpenedFile,
+          !mainWindow.isCropTransitionInProgress else { return }
     let windowScale = mpv.getDouble(MPVOption.Window.windowScale)
     if fabs(windowScale - info.cachedWindowScale) > 10e-10 {
       mainWindow.setWindowScale(windowScale)
@@ -3432,6 +3844,8 @@ class PlayerCore: NSObject {
     switch option {
 
     case .time:
+      // A paused filter refresh seeks internally; its final position arrives with playback-restart.
+      guard !isRefreshingPausedCrop, !mainWindow.isFullscreenTransitionInProgress else { return }
       let isNetworkStream = info.isNetworkResource
       syncPosition()
       info.videoRemaining?.second = Preference.bool(for: .scaleRemainingTime) ?
@@ -3470,6 +3884,7 @@ class PlayerCore: NSObject {
   }
 
   func sendOSD(_ osd: OSDMessage, autoHide: Bool = true, forcedTimeout: Float? = nil, accessoryView: NSView? = nil, context: Any? = nil, external: Bool = false) {
+    guard external || currentOSDFeedbackOrigin != .sidebar || !osd.isSettingFeedback else { return }
     // querying `mainWindow.isWindowLoaded` will initialize mainWindow unexpectedly
     guard !isInMiniPlayer, mainWindow.loaded, info.state.active,
           Preference.bool(for: .enableOSD) || osd.alwaysEnabled, !osd.isDisabled else { return }
@@ -3479,6 +3894,7 @@ class PlayerCore: NSObject {
       }
     }
     DispatchQueue.main.async {
+      guard self.info.state.active else { return }
       self.mainWindow.displayOSD(osd,
                                  autoHide: autoHide,
                                  forcedTimeout: forcedTimeout,
@@ -3770,7 +4186,36 @@ class PlayerCore: NSObject {
       switch label {
       case Constants.FilterName.crop:
         info.cropFilter = filter
-        info.unsureCrop = previousCrop?.isEqual(filter) == true ? previousCropDescription : ""
+        let unchanged = previousCrop?.isEqual(filter) == true
+        info.unsureCrop = unchanged &&
+          !["", "None"].contains(previousCropDescription) ? previousCropDescription : "Custom"
+        // Watch-later retains the rectangle, but a fresh player has no preset name.
+        // Match the centered source crop, not just its ratio: an offset/custom
+        // rectangle must remain Custom. Source geometry may become available only
+        // at playback-restart, after the preloaded hook first reads these filters.
+        if info.unsureCrop == "Custom",
+           !unchanged || ["", "None"].contains(previousCropDescription) || info.justStartedFile,
+           filter.type == .crop, let params = filter.params,
+           let width = params["w"].flatMap(Int.init), let height = params["h"].flatMap(Int.init),
+           width > 0, height > 0 {
+          let geometry = interactiveVideoGeometry(uncropped: true)
+          if geometry.sourceSize.width > 0, geometry.sourceSize.height > 0,
+             geometry.pixelAspectRatio.isFinite, geometry.pixelAspectRatio > 0 {
+            let x = params["x"].flatMap(Int.init) ?? Int((geometry.sourceSize.width - CGFloat(width)) / 2)
+            let y = params["y"].flatMap(Int.init) ?? Int((geometry.sourceSize.height - CGFloat(height)) / 2)
+            for preset in AppData.cropsInPanel.dropFirst() + AppData.aspects {
+              guard let aspect = Aspect(string: preset) else { continue }
+              let pixelAspect = Aspect(size: NSSize(width: aspect.value / geometry.pixelAspectRatio, height: 1))
+              let size = geometry.selectionSize.crop(withAspect: pixelAspect)
+              let selection = size.centeredRect(in: NSRect(origin: .zero, size: geometry.selectionSize))
+              let rect = geometry.filterRect(for: selection)
+              if width == Int(rect.width), height == Int(rect.height), x == Int(rect.minX), y == Int(rect.minY) {
+                info.unsureCrop = preset
+                break
+              }
+            }
+          }
+        }
       case Constants.FilterName.flip:
         info.flipFilter = filter
       case Constants.FilterName.mirror:
@@ -3789,6 +4234,10 @@ class PlayerCore: NSObject {
       if label.hasPrefix(Constants.FilterName.audioEq) {
         info.audioEqFilter = filter
       }
+    }
+    let sameCrop = previousCrop?.isEqual(info.cropFilter) ?? (info.cropFilter == nil)
+    if !sameCrop || previousCropDescription != info.unsureCrop {
+      postNotification(.iinaTrackSettingsChanged)
     }
   }
 

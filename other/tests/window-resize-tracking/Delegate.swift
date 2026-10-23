@@ -17,24 +17,31 @@ class State { var active = true }
 class Info { var state = State() }
 class Player { var info = Info() }
 class Panel { func updatePosition() {} }
+class Editor { var isActive = false }
 class DelegateFixture {
   var loaded = true
   var isApplyingVideoTransformWindowFrame = false
+  var isCropTransitionInProgress = false
+  var isFullscreenTransitionInProgress = false
   var finishedAspectTransitions = 0
+  func interruptPlayerCropTransition(settleWindowFrame: Bool = true) {}
   func finishVideoAspectTransition() { finishedAspectTransitions += 1 }
-  func resetVideoTransformWindowArea() {}
+  func rememberVideoTransformWindowResize() {}
   var window: NSWindow?
   var fsState = FullscreenState.windowed
   var windowResizeSession: WindowResizeSession?
+  var videoTransformWindowDisplaySize: NSSize?
   var testMouse = NSPoint.zero
   var oscPosition = Preference.OSCPosition.floating
   let minimumWindowSize = NSSize(width: 400, height: 225)
-  var currentWindowAspectRatio: NSSize { window!.aspectRatio }
+  // PRODUCTION_ASPECT_HELPERS
   let videoView = Video()
+  let interactiveMode = Editor()
   let liveText = LiveText()
   let player = Player()
   let oscFloatingView = Panel()
-  func invalidateFloatingOSCLayout() {}
+  var layoutInvalidations = 0
+  func invalidateFloatingOSCLayout() { layoutInvalidations += 1 }
   func updateWindowParametersForMPV() {}
   func windowFrameConstrainedToScreen(_ frame: NSRect, screenFrame: NSRect?) -> NSRect { frame }
   // PRODUCTION_METHODS
@@ -70,7 +77,7 @@ for dx: CGFloat in [-100, -50, 0, 50, 100, -50, 0] {
 }
 fixture.testMouse = NSPoint(x: start.x - 600, y: start.y)
 check(fixture.windowWillResize(window, to: nativeProposal) == fixture.minimumWindowSize,
-      "Pointer-based corner resize still honors the existing proportional minimum")
+      "Pointer-based corner resize still honors both minimum dimensions")
 window.maxSize = NSSize(width: 900, height: 600)
 fixture.testMouse = NSPoint(x: start.x + 400, y: start.y)
 check(fixture.windowWillResize(window, to: nativeProposal) == NSSize(width: 900, height: 506.25),
@@ -103,4 +110,64 @@ fixture.isApplyingVideoTransformWindowFrame = false
 fixture.player.info.state.active = false
 fixture.windowDidEndLiveResize(endNotification)
 check(fixture.windowResizeSession == nil, "Ending resize clears tracking even when playback has stopped")
+window.maxSize = NSSize(width: 4000, height: 4000)
+window.setFrame(NSRect(x: 100, y: 100, width: 800, height: 225), display: false)
+window.aspectRatio = window.frame.size
+fixture.player.info.state.active = true
+fixture.testMouse = NSPoint(x: window.frame.maxX - 2, y: window.frame.midY)
+fixture.windowWillStartLiveResize(startNotification)
+check(window.aspectRatio == .zero, "Pointer tracking temporarily removes native aspect/minimum coupling")
+fixture.testMouse.x -= 160
+let smaller = fixture.windowWillResize(window, to: nativeProposal)
+check(smaller == NSSize(width: 640, height: 225), "A letterboxed window can shrink in width without growing or violating minimum height")
+window.setFrame(NSRect(origin: window.frame.origin, size: smaller), display: false)
+fixture.windowDidEndLiveResize(endNotification)
+check(fixture.windowResizeSession == nil && window.aspectRatio == smaller,
+      "Ending a minimum-clamped gesture restores native aspect locking to the actual window")
+fixture.testMouse = NSPoint(x: window.frame.maxX - 2, y: window.frame.midY)
+fixture.windowWillStartLiveResize(startNotification)
+fixture.testMouse.x += 160
+let enlarged = fixture.windowWillResize(window, to: nativeProposal)
+check(enlarged == NSSize(width: 800, height: 281.25), "A subsequent gesture uses the new window proportions")
+fixture.windowDidEndLiveResize(endNotification)
 print("Window resize delegate: \(checks) checks passed")
+
+fixture.isApplyingVideoTransformWindowFrame = true
+let invalidations = fixture.layoutInvalidations
+_ = fixture.windowWillResize(window, to: NSSize(width: 720, height: 450))
+check(fixture.layoutInvalidations == invalidations, "automatic crop steps do not force layout of the previous frame")
+fixture.isApplyingVideoTransformWindowFrame = false
+_ = fixture.windowWillResize(window, to: NSSize(width: 720, height: 450))
+check(fixture.layoutInvalidations == invalidations + 1, "manual or rejected resize proposals retain the native control repair")
+
+print("Window resize delegate including automatic-step checks: \(checks) passed")
+
+window.setFrame(NSRect(x: 100, y: 100, width: 400, height: 225), display: false)
+window.aspectRatio = window.frame.size
+fixture.videoTransformWindowDisplaySize = NSSize(width: 5, height: 4)
+fixture.testMouse = NSPoint(x: window.frame.maxX - 2, y: window.frame.midY)
+fixture.windowWillStartLiveResize(startNotification)
+let recoveryStart = fixture.testMouse
+check(fixture.windowWillResize(window, to: nativeProposal) == window.frame.size,
+      "minimum padding does not jump to the video aspect on mouse-down")
+fixture.testMouse.x += 200
+let recovered = fixture.windowWillResize(window, to: nativeProposal)
+check(recovered == NSSize(width: 600, height: 480), "enlarging a clamped crop recovers its actual video aspect")
+window.setFrame(NSRect(origin: window.frame.origin, size: recovered), display: false)
+fixture.windowDidEndLiveResize(endNotification)
+fixture.testMouse = NSPoint(x: window.frame.maxX - 2, y: window.frame.midY)
+fixture.windowWillStartLiveResize(startNotification)
+fixture.testMouse.x -= 200
+let minimumCrop = fixture.windowWillResize(window, to: nativeProposal)
+check(minimumCrop == NSSize(width: 400, height: 320), "a recovered crop keeps its ratio on the next gesture")
+fixture.interactiveMode.isActive = true
+fixture.windowDidEndLiveResize(endNotification)
+window.setFrame(NSRect(x: 100, y: 100, width: 800, height: 450), display: false)
+window.aspectRatio = window.frame.size
+fixture.testMouse = NSPoint(x: window.frame.maxX - 2, y: window.frame.midY)
+fixture.windowWillStartLiveResize(startNotification)
+fixture.testMouse.x += 160
+check(fixture.windowWillResize(window, to: nativeProposal) == NSSize(width: 960, height: 540),
+      "the Custom editor retains its own window aspect instead of the committed crop aspect")
+fixture.windowDidEndLiveResize(endNotification)
+print("Adaptive crop resize delegate: \(checks) checks passed")

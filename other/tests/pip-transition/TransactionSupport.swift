@@ -6,8 +6,17 @@ enum CATransaction {
  static func begin() { begins += 1 }; static func commit() { commits += 1 }; static func flush() { flushes += 1 }
 }
 class Layer: Base {
+ func deferCropDisplayUntilFrameTime() -> Bool { false }
+ var cropSurface: CropSurfaceFixture?
+ func requestCropDisplay(_ surface: CropSurfaceFixture) {}
  let displayLock = NSRecursiveLock(); let mainThreadPriorityLock = PriorityLock()
  var needsFlip = false; var isHostedInPIP = false
+ var isDrawingGeometryHandoff = false
+ var skippedEmptyCropFrame = false
+ var isInFullscreenTransition = false
+ var inLiveResize = false, isAnimatingWindowResize = false
+ func scheduleFullscreenDisplay() { preconditionFailure("PiP must keep its main-thread surface transaction") }
+ func completeFullscreenTransitionIfReady() {}
 // PRODUCTION_DISPLAY
 
 }
@@ -27,3 +36,5 @@ for hosted in [false, true] {
  check(CATransaction.begins == 1 && CATransaction.commits == 1, "background explicit transaction preserved")
 }
 print("Passed \(checks) production transaction checks")
+
+final class CropSurfaceFixture { var isCaptured = true }

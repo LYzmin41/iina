@@ -47,3 +47,33 @@ for ratio in [NSSize.zero, NSSize(width: -1, height: 1), NSSize(width: CGFloat.i
         "Unlocked or invalid aspect ratios must not create a proportional resize session")
 }
 print("Window resize tracking: \(checks) checks passed")
+
+// Minimum padding must not become the next gesture's preferred aspect.
+for ratio in [NSSize(width: 5, height: 4), NSSize(width: 4, height: 1)] {
+  let initial = NSRect(x: -500, y: 100, width: ratio.width == 5 ? 400 : 800, height: 225)
+  for horizontal in [true, false] {
+    let start = NSPoint(x: horizontal ? initial.maxX : initial.midX,
+                        y: horizontal ? initial.midY : initial.maxY)
+    let session = WindowResizeSession(frame: initial, mouse: start, aspectRatio: ratio)!
+    check(session.size(at: start) == initial.size, "A padded window cannot jump on mouse-down")
+    var previous = initial.size
+    for distance: CGFloat in stride(from: 0, through: 600, by: 1) {
+      let pointer = NSPoint(x: start.x + (horizontal ? distance : 0),
+                            y: start.y + (horizontal ? 0 : distance))
+      let result = session.size(at: pointer)
+      check(near(horizontal ? result.width : result.height,
+                 (horizontal ? initial.width : initial.height) + distance),
+            "The grabbed axis follows the pointer while padding recovers")
+      check(result.width >= previous.width && result.height >= previous.height,
+            "Enlarging a padded window cannot shrink either dimension")
+      check(abs(result.width - previous.width) < 12 && abs(result.height - previous.height) < 12,
+            "Aspect recovery has no discontinuous size step")
+      previous = result
+    }
+    check(near(previous.width / previous.height, ratio.width / ratio.height),
+          "Enlargement recovers the video aspect instead of scaling its black fields")
+    check(session.size(at: start) == initial.size, "Reversing the drag restores its exact initial padding")
+  }
+}
+
+print("Adaptive window resize tracking: \(checks) checks passed")

@@ -11,6 +11,17 @@ class OSCFloatingView: TranslucentView {
   private var preferredWidthConstraint: NSLayoutConstraint!
   private var paddingConstraints: [(constraint: NSLayoutConstraint, regular: CGFloat, compact: CGFloat)] = []
   private var updatingPosition = false
+  private struct PreparedResize {
+    let contentSize: NSSize
+    let compact: Bool
+    let style: Style
+    let mainWindow: ObjectIdentifier
+    let window: ObjectIdentifier
+    let contentView: ObjectIdentifier
+    let container: ObjectIdentifier?
+    let scale: CGFloat
+  }
+  private var preparedResize: PreparedResize?
   weak var mainWindow: MainWindowController!
   private let prefObserver = Preference.Observer()
 
@@ -39,7 +50,13 @@ class OSCFloatingView: TranslucentView {
   var isReturningToDefault: Bool { positionMotion != nil }
 
   override var isHidden: Bool {
-    didSet { if isHidden { cancelPositionAnimation(); cancelPendingBackgroundClick() } }
+    didSet {
+      if isHidden {
+        preparedResize = nil
+        cancelPositionAnimation()
+        cancelPendingBackgroundClick()
+      }
+    }
   }
 
   override var mouseDownCanMoveWindow: Bool {
@@ -109,6 +126,7 @@ class OSCFloatingView: TranslucentView {
   }
 
   func beginWindowSession() {
+    preparedResize = nil
     guard windowSessionEnded else { return }
     windowSessionEnded = false
     currentPosition = Preference.floatingOSCDefaultPosition
@@ -116,6 +134,7 @@ class OSCFloatingView: TranslucentView {
   }
 
   func endWindowSession() {
+    preparedResize = nil
     cancelPendingBackgroundClick()
     cancelPositionAnimation()
     windowSessionEnded = true
@@ -142,36 +161,105 @@ class OSCFloatingView: TranslucentView {
                                              margin: margin)
   }
 
-  func updatePosition(animated: Bool = false) {
+  func updatePosition(animated: Bool = false, deferringFinalLayout: Bool = false,
+                      afterPreparedResize: Bool = false) {
     guard !isDragging, !updatingPosition, let mainWindow, let contentView = mainWindow.window?.contentView,
-          xConstraint != nil else { return }
+          xConstraint != nil else {
+      preparedResize = nil
+      return
+    }
     updatingPosition = true
     defer { updatingPosition = false }
-    guard let target = positionTarget(in: contentView) else { return }
+    guard let target = positionTarget(in: contentView, afterPreparedResize: afterPreparedResize) else { return }
     if isReturningToDefault {
       // Resize can precede the next motion tick; clamp the displayed frame without changing session intent.
-      applyPosition(CGPoint(x: xConstraint.constant, y: yConstraint.constant), in: contentView)
+      applyPosition(CGPoint(x: xConstraint.constant, y: yConstraint.constant), in: contentView,
+                    deferringFinalLayout: deferringFinalLayout)
       return
     }
     if animated && !AccessibilityPreferences.motionReductionEnabled {
       xConstraint.animator().constant = target.x
       yConstraint.animator().constant = target.y
     } else {
-      applyPosition(target, in: contentView)
+      applyPosition(target, in: contentView, deferringFinalLayout: deferringFinalLayout)
     }
   }
 
-  private func positionTarget(in contentView: NSView, position: FloatingOSCPosition? = nil) -> CGPoint? {
-    let scale = FloatingOSCScale.factor(for: contentView.bounds.size)
-    mainWindow.updateFloatingOSCScale(scale: scale)
-    let windowWidth = contentView.bounds.width
-    preferredWidthConstraint.constant = width * scale
+  /// Queue the next size metrics before AppKit lays out a programmatic resize.
+  @discardableResult
+  func prepareForResize(to contentSize: NSSize) -> Bool {
+    preparedResize = nil
     let compact = Preference.bool(for: .compactUI)
-    for item in paddingConstraints {
-      item.constraint.constant = (compact ? item.compact : item.regular) * scale
+    let changed = updateSizeMetrics(to: contentSize, compact: compact)
+    if !updatingPosition, contentSize.width.isFinite, contentSize.height.isFinite,
+       contentSize.width > 0, contentSize.height > 0, let mainWindow,
+       let window = mainWindow.window, self.window === window, let contentView = window.contentView {
+      preparedResize = PreparedResize(contentSize: contentSize, compact: compact, style: style,
+        mainWindow: ObjectIdentifier(mainWindow), window: ObjectIdentifier(window),
+        contentView: ObjectIdentifier(contentView), container: container.map(ObjectIdentifier.init),
+        scale: mainWindow.floatingOSCScale)
     }
-    // AppKit may still have the previous control dimensions; lay out before clamping the panel.
-    contentView.layoutSubtreeIfNeeded()
+    return changed
+  }
+
+  private func updateSizeMetrics(to contentSize: NSSize, compact: Bool) -> Bool {
+    guard let mainWindow else { return false }
+    let scale = FloatingOSCScale.factor(for: contentSize)
+    var changed = mainWindow.floatingOSCScale != scale
+    mainWindow.updateFloatingOSCScale(scale: scale)
+    let preferredWidth = width * scale
+    if preferredWidthConstraint.constant != preferredWidth {
+      preferredWidthConstraint.constant = preferredWidth
+      changed = true
+    }
+    for item in paddingConstraints {
+      let padding = (compact ? item.compact : item.regular) * scale
+      if item.constraint.constant != padding {
+        item.constraint.constant = padding
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  private func hasPendingLayout(in view: NSView) -> Bool {
+    view.needsLayout || view.needsUpdateConstraints || view.subviews.contains { hasPendingLayout(in: $0) }
+  }
+
+  private func positionTarget(in contentView: NSView, position: FloatingOSCPosition? = nil,
+                              afterPreparedResize: Bool = false) -> CGPoint? {
+    // A preparation belongs to exactly one placement attempt, including normal
+    // updates and fallbacks. AppKit can round the requested window dimensions
+    // upward by at most one point; keep that tick's already measured OSC metrics
+    // rather than invalidating its controls again for the fractional difference.
+    let preparation = preparedResize
+    preparedResize = nil
+    let compact = Preference.bool(for: .compactUI)
+    let size = contentView.bounds.size
+    let reusesPreparedMetrics: Bool
+    if afterPreparedResize, let preparation, let mainWindow, let window = mainWindow.window {
+      reusesPreparedMetrics = size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0 &&
+        abs(size.width - preparation.contentSize.width) <= 1 &&
+        abs(size.height - preparation.contentSize.height) <= 1 &&
+        compact == preparation.compact && style == preparation.style &&
+        ObjectIdentifier(mainWindow) == preparation.mainWindow &&
+        ObjectIdentifier(window) == preparation.window && self.window === window &&
+        ObjectIdentifier(contentView) == preparation.contentView &&
+        container.map(ObjectIdentifier.init) == preparation.container &&
+        mainWindow.floatingOSCScale == preparation.scale &&
+        preferredWidthConstraint.constant == width * preparation.scale &&
+        paddingConstraints.allSatisfy {
+          $0.constraint.constant == (compact ? $0.compact : $0.regular) * preparation.scale
+        } && !contentView.needsLayout && !contentView.needsUpdateConstraints &&
+        !hasPendingLayout(in: self) && frame.width > 0 && frame.height > 0
+    } else {
+      reusesPreparedMetrics = false
+    }
+    if !reusesPreparedMetrics {
+      _ = updateSizeMetrics(to: size, compact: compact)
+      contentView.layoutSubtreeIfNeeded()
+    }
+    let windowWidth = contentView.bounds.width
     let oscWidth = frame.width > 0 ? frame.width : min(width, windowWidth)
     let oscHeight = frame.height > 0 ? frame.height : fittingSize.height
     guard windowWidth > 0, contentView.bounds.height > 0 else { return nil }
@@ -185,12 +273,14 @@ class OSCFloatingView: TranslucentView {
     return CGPoint(x: requested.midX, y: requested.minY)
   }
 
-  private func applyPosition(_ position: CGPoint, in contentView: NSView) {
+  private func applyPosition(_ position: CGPoint, in contentView: NSView, deferringFinalLayout: Bool = false) {
     let xRange = FloatingOSCPlacement.horizontalRange(width: frame.width, windowWidth: contentView.bounds.width)
-    xConstraint.constant = position.x.clamped(to: (xRange.lowerBound + frame.width / 2)...(xRange.upperBound + frame.width / 2))
-    yConstraint.constant = position.y.clamped(to: verticalRange(in: contentView, height: frame.height))
+    let x = position.x.clamped(to: (xRange.lowerBound + frame.width / 2)...(xRange.upperBound + frame.width / 2))
+    let y = position.y.clamped(to: verticalRange(in: contentView, height: frame.height))
+    if xConstraint.constant != x { xConstraint.constant = x }
+    if yConstraint.constant != y { yConstraint.constant = y }
     contentView.needsLayout = true
-    contentView.layoutSubtreeIfNeeded()
+    if !deferringFinalLayout { contentView.layoutSubtreeIfNeeded() }
   }
 
   override func hitTest(_ point: NSPoint) -> NSView? {
@@ -389,6 +479,7 @@ class OSCFloatingView: TranslucentView {
   }
 
   override func viewDidMoveToWindow() {
+    preparedResize = nil
     super.viewDidMoveToWindow()
     if window == nil { cancelPositionAnimation(); cancelPendingBackgroundClick() }
   }

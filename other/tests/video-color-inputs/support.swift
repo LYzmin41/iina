@@ -15,6 +15,7 @@ struct ColorSettings {
   var brightness = 12, contrast = -8, saturation = 5, gamma = -2, hue = 17
 }
 final class PlayerCore {
+  @discardableResult func performSidebarChange<T>(_ action: () -> T) -> T { action() }
   enum VideoEqualizerType { case brightness, contrast, saturation, gamma, hue }
   struct Window { struct Mode { var isActive = false }; var interactiveMode = Mode() }
   struct Targets { var id = 0; func target(_ group: TrackSettingsGroup) -> Int { id } }

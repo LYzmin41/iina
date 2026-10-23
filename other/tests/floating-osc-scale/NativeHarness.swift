@@ -9,6 +9,8 @@ struct Preference {
 }
 final class TestVolumeButton: NSView { let imageView = NSImageView() }
 class NativeScaleHarness {
+  var isApplyingVideoTransformWindowFrame = false
+  var isFullscreenTransitionInProgress = false
   var oscPosition: Preference.OSCPosition = .floating
   var muteButton: TestVolumeButton! = TestVolumeButton()
   var volumeSlider: NSSlider! = NSSlider()

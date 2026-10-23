@@ -301,8 +301,9 @@ check(freeSaved?.widthValue == 40 && freeSaved?.widthUnit == .percent && freeSav
 Preference.unlockWindowAspectRatio = false
 Preference.oscPosition = .bottom
 present("640x480")
-check(!field("$InitialWindowSize").isHiddenOrHasHiddenAncestor && field("$Width").isHiddenOrHasHiddenAncestor,
-      "reopening after locking returns to a single size selector")
+check(field("$InitialWindowSize").isHiddenOrHasHiddenAncestor && !field("$Width").isHiddenOrHasHiddenAncestor &&
+      !field("$Height").isHiddenOrHasHiddenAncestor,
+      "explicit startup dimensions remain visible after locking the live window aspect ratio")
 cancel()
 
 func reshape(from start: NSPoint, to end: NSPoint, modifiers: NSEvent.ModifierFlags = []) {

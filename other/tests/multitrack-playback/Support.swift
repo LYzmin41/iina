@@ -106,6 +106,7 @@ class MainFixture {
   let videoView = VideoFixture()
   var loaded = true
   var aspectTransitions = 0, finishedTransitions = 0
+  func prepareVideoTransformWindowReference() {}
   func beginVideoAspectTransition() -> Bool { aspectTransitions += 1; return true }
   func finishVideoAspectTransition(restore: Bool = true) { finishedTransitions += 1 }
   var window: NSWindow?
@@ -185,6 +186,9 @@ class MPVFixture {
   }
 }
 class PlayerCore {
+  enum OSDFeedbackOrigin { case command, sidebar }
+  var currentOSDFeedbackOrigin: OSDFeedbackOrigin { .command }
+  @discardableResult func performSidebarChange<T>(_ action: () -> T) -> T { action() }
   let info = Info(), mpv = MPVFixture()
   init() {
     mpv.addition = { [weak self] in

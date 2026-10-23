@@ -65,7 +65,7 @@ extension MainWindowController {
       return
     }
 
-    window.setFrame(windowFrameConstrainedToScreen(newFrame, screenFrame: screenFrame), display: true, animate: true)
+    setUserWindowFrame(windowFrameConstrainedToScreen(newFrame, screenFrame: screenFrame))
   }
 
   @objc func menuAlwaysOnTop(_ sender: AnyObject) {

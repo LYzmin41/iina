@@ -4,6 +4,67 @@ func check(_ value: @autoclosure () -> Bool, _ message: String) {
   precondition(value(), message); checks += 1; print("PASS: \(message)")
 }
 let a = URL(fileURLWithPath: "/tmp/video-A.mkv"), b = URL(fileURLWithPath: "/tmp/video-B.mkv")
+// A fresh player has no in-memory preset name when mpv restores watch-later vf.
+for preset in ["4:3", "5:4", "16:10", "21:9"] {
+  let writer = PlayerFixture()
+  writer.setCrop(fromString: preset)
+  let restored = PlayerFixture()
+  restored.mpv.videoFilters = [writer.info.cropFilter!]
+  restored.reloadSavedIINAfilters()
+  check(restored.settingsUpdates == 1,
+        "restoring a watch-later crop notifies an already-created sidebar")
+  check(restored.info.unsureCrop == preset,
+        "a fresh player recognizes the restored centered \(preset) preset")
+  restored.reloadSavedIINAfilters()
+  check(restored.settingsUpdates == 1, "unchanged filter reloads do not rebuild the sidebar")
+  restored.mpv.videoFilters = []
+  restored.reloadSavedIINAfilters()
+  check(restored.info.unsureCrop == "None" && restored.settingsUpdates == 2,
+        "restored crop removal publishes None once")
+}
+for (source, display, rotation) in [
+  (NSSize(width: 3840, height: 2160), NSSize(width: 3840, height: 2160), 0),
+  (NSSize(width: 720, height: 576), NSSize(width: 1024, height: 576), 0),
+  (NSSize(width: 1920, height: 1080), NSSize(width: 1920, height: 1080), 90)
+] {
+  let writer = PlayerFixture()
+  writer.geometry = CropVideoGeometry(sourceSize: source, displaySize: display, rotation: rotation)
+  writer.setCrop(fromString: "4:3")
+  let params = writer.info.cropFilter!.params!
+  let restored = PlayerFixture()
+  restored.geometry = writer.geometry
+  restored.mpv.videoFilters = [MPVFilter(name: "crop", label: Constants.FilterName.crop,
+    params: ["@0": params["w"]!, "@1": params["h"]!, "@2": params["x"]!, "@3": params["y"]!, "exact": "1"])]
+  restored.reloadSavedIINAfilters()
+  check(restored.info.unsureCrop == "4:3", "native watch-later parameter maps recognize rotated/anamorphic presets")
+  restored.info.cropFilter = nil
+  let shifted = MPVFilter.crop(w: Int(params["w"]!)!, h: Int(params["h"]!)!,
+                               x: Int(params["x"]!)! + 1, y: Int(params["y"]!)!, exact: true)
+  shifted.label = Constants.FilterName.crop
+  restored.mpv.videoFilters = [shifted]
+  restored.reloadSavedIINAfilters()
+  check(restored.info.unsureCrop == "Custom", "a matching ratio at a different source position remains Custom")
+}
+let lateSource = PlayerFixture()
+let centered = MPVFilter.crop(w: 960, h: 720, x: 160, y: 0, exact: true)
+centered.label = Constants.FilterName.crop
+lateSource.mpv.videoFilters = [centered]
+lateSource.geometry = CropVideoGeometry(sourceSize: .zero, displaySize: .zero, rotation: 0)
+lateSource.reloadSavedIINAfilters()
+check(lateSource.info.unsureCrop == "Custom", "preloaded filters cannot invent a preset before source geometry exists")
+lateSource.geometry = CropVideoGeometry(sourceSize: NSSize(width: 1280, height: 720),
+                                      displaySize: NSSize(width: 1280, height: 720), rotation: 0)
+lateSource.info.justStartedFile = true
+lateSource.reloadSavedIINAfilters()
+check(lateSource.info.unsureCrop == "4:3" && lateSource.settingsUpdates == 2,
+      "playback restart publishes the recognized preset when source geometry becomes ready")
+let committedCustom = PlayerFixture()
+committedCustom.mpv.videoFilters = [centered]
+committedCustom.info.cropFilter = centered
+committedCustom.info.unsureCrop = "Custom"
+committedCustom.reloadSavedIINAfilters()
+check(committedCustom.info.unsureCrop == "Custom" && committedCustom.geometryReads == 0,
+      "ordinary seek/restart preserves committed Custom without repolling source geometry")
 check(Aspect(string:"0:1") == nil && Aspect(string:"1:0") == nil &&
       Aspect(string:String(repeating:"9",count:400)+":1") == nil,
       "invalid or overflowing proportions never create an unusable aspect object")
@@ -46,6 +107,17 @@ check(p.scopedTrackSettings.video[2]?.rotation == 270 && p.scopedTrackSettings.t
 check(p.info.videoTrackOrder == [2,1] && p.refreshes.last == [2], "A restores selected video membership and order")
 p.reloadSavedIINAfilters()
 check(p.info.unsureCrop == "Custom", "playback restart does not erase the crop preset description")
+for legacyDescription in ["None", ""] {
+  p.info.unsureCrop = legacyDescription
+  p.reloadSavedIINAfilters()
+  check(p.info.unsureCrop == "Custom", "An actual crop normalizes legacy None/empty descriptions to Custom")
+}
+p.info.unsureCrop = "4:3"
+p.reloadSavedIINAfilters()
+check(p.info.unsureCrop == "4:3", "Reloading an unchanged named preset preserves its description")
+p.info.cropFilter = nil
+p.reloadSavedIINAfilters()
+check(p.info.unsureCrop == "Custom", "An externally restored crop is identified as Custom")
 // Reset/default is a meaningful state and must replace earlier saved edits.
 p.mpv.options["video-aspect-override"] = "-1"; p.mpv.options["video-rotate"] = "0"
 p.mpv.videoFilters = [unrelated]; p.info.unsureCrop = "None"
@@ -104,6 +176,10 @@ for pending in 0..<3 {
 }
 check(p.mainWindow.scales.isEmpty, "loading/watch-later window-scale notifications never resize a window")
 p.info.justStartedFile = false; p.info.justOpenedFile = false; p.info.state.loaded = true
+p.mainWindow.isCropTransitionInProgress = true
+p.windowScaleChanged()
+check(p.mainWindow.scales.isEmpty, "render-size notifications cannot compete with the crop transition's window geometry")
+p.mainWindow.isCropTransitionInProgress = false
 p.windowScaleChanged()
 check(p.mainWindow.scales == [1], "explicit scale commands still reach the native resize action")
 let stopped = PlayerFixture()

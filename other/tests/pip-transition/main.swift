@@ -14,7 +14,7 @@ for behavior in [Preference.WindowBehaviorWhenPip.hide,.minimize,.doNothing] {
    w.alphaValue=0.85
    c.enterPIP()
    check(c.pipStatus == .inPIP,"entered"); check(c.videoView.videoLayer.isHostedInPIP,"native transaction owned")
-   check(c.pipVideo.view === c.videoView,"same live surface")
+   check(c.pipVideo.view === c.videoView || c.videoView.superview === c.pipVideo.view,"same live surface")
    check(c.pip.playing == !paused,"playback preserved")
    c.enterPIP();check(c.pip.presented == 1,"duplicate entry suppressed")
    check(c.isWindowHidden == (behavior == .hide && !fullscreen),"hide policy")
@@ -54,14 +54,23 @@ for behavior in [Preference.WindowBehaviorWhenPip.hide,.minimize,.doNothing] {
  c.videoView.beforeHandoff = { check(w.testVisible, "entry drawn before hiding source") }
  c.enterPIP()
  check(w.testVisible && !w.minimized,"source remains until preparation")
+ check(c.videoView.superview === c.videoViewContainer,"live playback remains in source during native preparation")
+ check(!c.videoView.videoLayer.isHostedInPIP,"source keeps normal rendering ownership during preparation")
+ check(c.operationFeedbackRequests.count == 1,"preparation owns delayed feedback")
  let callback=c.pip.completion!
  c.videoViewContainer.frame.size = NSSize(width: 640,height: 360)
  callback()
+ check(c.videoView.superview === c.pipVideo.view,"same live view transfers only when native host is ready")
+ check(c.videoView.videoLayer.isHostedInPIP,"native ownership begins with transfer")
+ check(c.operationFeedbackRequests.isEmpty,"ready handoff completes its feedback")
  check(c.isWindowHidden == (behavior == .hide),"prepared hide policy")
  check(w.minimized == (behavior == .minimize),"prepared minimize policy")
  if behavior == .hide {
   check(c.pip.window.contentRect(forFrameRect:c.pip.window.frame) == expected,"native launch uses source video geometry")
  }
+ c.pip.window.setContentSize(NSSize(width: 328, height: 185))
+ check(c.pipVideo.view.bounds.size == NSSize(width: 328, height: 185),"staged container follows the actual native host")
+ check(c.videoView.frame == c.pipVideo.view.bounds,"live video fits its receiving container after native resize")
  check(c.pip.window.frontCalls == 0,"no forced local host presentation")
  check(c.pip.window.animationBehavior == .default,"host animation restored")
  let draws=c.videoView.handoffs
@@ -86,6 +95,42 @@ Preference.behavior = .hide
 let cancelled=MainWindowController();let sourceWindow=cancelled.window as! Window
 cancelled.enterPIP();let stale=cancelled.pip.completion!
 cancelled.exitPIP();stale()
+check(cancelled.operationFeedbackRequests.isEmpty,"cancelled preparation releases feedback")
 check(sourceWindow.testVisible,"return before preparation cannot hide source")
 cancelled.pipDidClose(cancelled.pip)
+let feedbackOwner = MainWindowController()
+let capture = feedbackOwner.beginOperationFeedback()
+let sharedToken = feedbackOwner.operationFeedbackToken
+let lut = feedbackOwner.beginOperationFeedback()
+check(feedbackOwner.operationFeedbackRequests.count == 2,"overlap keeps independent request ownership")
+check(feedbackOwner.operationFeedbackToken == sharedToken,"overlap keeps the original feedback clock")
+check(feedbackOwner.operationFeedbackView?.hitTest(.zero) == nil,"generic feedback never intercepts controls")
+feedbackOwner.endOperationFeedback(capture)
+check(feedbackOwner.operationFeedbackToken == sharedToken,"first completion cannot hide pending import")
+feedbackOwner.endOperationFeedback(lut)
+check(feedbackOwner.operationFeedbackToken == nil,"last completion releases shared feedback")
+let replacement = feedbackOwner.beginOperationFeedback()
+let replacementToken = feedbackOwner.operationFeedbackToken
+feedbackOwner.endOperationFeedback(capture)
+check(feedbackOwner.operationFeedbackToken == replacementToken,"stale completion cannot hide a replacement")
+feedbackOwner.closeFeedback()
+check(feedbackOwner.operationFeedbackView == nil && feedbackOwner.operationFeedbackRequests.isEmpty,"window closure invalidates feedback")
+feedbackOwner.endOperationFeedback(replacement)
+check(feedbackOwner.operationFeedbackToken == nil,"late completion after closure stays cancelled")
+let nativeCancelled = MainWindowController()
+nativeCancelled.enterPIP()
+let nativeStale = nativeCancelled.pip.completion!
+nativeCancelled.pipWillClose(nativeCancelled.pip)
+check(nativeCancelled.operationFeedbackRequests.isEmpty,"native close before readiness releases feedback")
+nativeStale()
+nativeCancelled.pipDidClose(nativeCancelled.pip)
+let overlap = MainWindowController()
+let captureInPlayer = overlap.beginOperationFeedback()
+let overlapClock = overlap.operationFeedbackToken
+overlap.enterPIP(); overlap.pip.completion?()
+check(overlap.operationFeedbackView?.superview === overlap.videoView,"pending screenshot feedback follows live video into PiP")
+check(overlap.operationFeedbackToken == overlapClock,"transfer preserves pending feedback clock")
+overlap.exitPIP(); overlap.pipDidClose(overlap.pip)
+check(overlap.operationFeedbackView?.superview === overlap.videoViewContainer,"pending feedback follows return")
+overlap.endOperationFeedback(captureInPlayer)
 print("Native PiP production-method checks passed: \(count)")

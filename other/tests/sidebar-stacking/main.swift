@@ -35,6 +35,7 @@ extension Comparable {
   func clamped(to range: ClosedRange<Self>) -> Self { min(max(self, range.lowerBound), range.upperBound) }
 }
 class MainWindowController: PlayerWindowController {
+  func cancelWindowDrag() {}
   enum UIAnimationState { case hidden, shown, willHide, willShow }
   struct InteractiveMode { var isActive = false }
   var interactiveMode = InteractiveMode()

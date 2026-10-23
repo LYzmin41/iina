@@ -256,13 +256,10 @@ fileprivate class SubDelayView: SidebarSliderView {
     let value = input.doubleValue
     player.setSubDelay(value, forPrimary: isPrimary)
     slider.doubleValue = value
-    if let window = input.window {
-      window.makeFirstResponder(window.contentView)
-    }
   }
 
   override func resetButtonAction() {
-    player.setSubDelay(0, forPrimary: isPrimary)
+    player.performSidebarChange { player.setSubDelay(0, forPrimary: isPrimary) }
   }
 }
 
@@ -346,13 +343,15 @@ fileprivate class SubPositionDelayView: NSView {
   }
 
   @objc private func resetAdjustments() {
-    delayView.resetButtonAction()
-    player.setSubPos(isPrimary ? 100 : 0, forPrimary: isPrimary)
+    player.performSidebarChange {
+      delayView.resetButtonAction()
+      player.setSubPos(isPrimary ? 100 : 0, forPrimary: isPrimary)
+    }
     update()
   }
 
   @objc private func positionAction(_ sender: AnyObject) {
-    player.setSubPos(Int(positionSlider.intValue), forPrimary: isPrimary)
+    player.performSidebarChange { player.setSubPos(Int(positionSlider.intValue), forPrimary: isPrimary) }
   }
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
@@ -527,7 +526,7 @@ fileprivate class SubStyleView: NSView {
   }
 
   @objc func resetStyle() {
-    player.resetSubtitleStyle(forPrimary: isPrimary)
+    player.performSidebarChange { player.resetSubtitleStyle(forPrimary: isPrimary) }
     updateScale()
     updateTextStyle()
   }
@@ -543,30 +542,32 @@ fileprivate class SubStyleView: NSView {
       mappedValue = round((value - 1) * 20) / 20
       realValue = 1 / mappedValue
     }
-    player.setSubScale(realValue, forPrimary: isPrimary)
+    player.performSidebarChange { player.setSubScale(realValue, forPrimary: isPrimary) }
   }
 
   @objc func chooseSubFontAction(_ sender: AnyObject) {
-    player.chooseSubFont(forPrimary: isPrimary)
+    player.performSidebarChange { player.chooseSubFont(forPrimary: isPrimary) }
   }
 
   @objc func chooseSubFontSizeAction(_ sender: AnyObject) {
     guard let title = fontSizePicker.selectedItem?.title, let value = Double(title) else { return }
-    player.setSubTextSize(value, forPrimary: isPrimary)
+    player.performSidebarChange { player.setSubTextSize(value, forPrimary: isPrimary) }
   }
 
   @objc func chooseSubBorderSizeAction(_ sender: AnyObject) {
     guard let title = borderSizePicker.selectedItem?.title, let value = Double(title) else { return }
-    player.setSubTextBorderSize(value, forPrimary: isPrimary)
+    player.performSidebarChange { player.setSubTextBorderSize(value, forPrimary: isPrimary) }
   }
 
   @objc func colorAction(_ sender: NSColorWell) {
     let color = sender.color.mpvColorString
-    switch sender.tag {
-    case 1: player.setSubTextColor(color, forPrimary: isPrimary)
-    case 2: player.setSubTextBgColor(color, forPrimary: isPrimary)
-    case 3: player.setSubTextBorderColor(color, forPrimary: isPrimary)
-    default: break
+    player.performSidebarChange {
+      switch sender.tag {
+      case 1: player.setSubTextColor(color, forPrimary: isPrimary)
+      case 2: player.setSubTextBgColor(color, forPrimary: isPrimary)
+      case 3: player.setSubTextBorderColor(color, forPrimary: isPrimary)
+      default: break
+      }
     }
   }
 

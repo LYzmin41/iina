@@ -1,18 +1,28 @@
-# LYINA Interface Preview — 2026-10-20
+# LYINA Interface Preview — updated 2026-10-23
 
 An experimental build for trying the player interface proposal independently of
 official IINA. This is not an official IINA release or an upstream-approved patch.
 The application reports LYINA 1.5.1 (180).
 
-## Crop-fix update
+## October 23 update
 
-The updated download corrects color corruption from odd-pixel exact crops on
-NV12/P010-style input. Crop exit now keeps the selected region visible across
-filter reconfiguration and coordinates its expansion with the window resize.
-Concurrent Live Text/frame capture and rendering shutdown are handled explicitly.
-See `docs/testing/2026-10-20-crop-color-exit.md` for local checks and their limits.
-The asset filenames remain stable so the existing proposal's download link
-receives the fixed build.
+The existing download now contains the current locally checked interface build:
+
+- Revised native-video transitions for Crop, Custom Crop, Aspect Ratio and
+  Rotation, including preset restoration, cancellation, fullscreen and PiP.
+- Adaptive crop-transition raster sizing to retain more detail during large
+  zooms, with bounded allocations and the existing color/HDR pipeline.
+- Sidebar parameter edits no longer produce redundant setting or seek OSD;
+  keyboard shortcuts, deliberate seeking, errors and operation outcomes retain
+  their feedback. Geometry Reset refreshes Rotation on its first click.
+- Native sidebar fields have complete focus rings, select-all behavior, commits
+  on Enter/focus loss, and empty-value defaults for Aspect Ratio, Speed, Audio
+  Delay, Subtitle Delay and Color.
+
+Earlier exact-crop color, drag lifecycle and screenshot-feedback fixes remain
+included. OpenSubtitles plugin integration is deferred and is not bundled.
+See `docs/testing/2026-10-23-preview-update.md` for verification and limits.
+Asset filenames remain stable so existing download links receive this build.
 
 ## Download and installation
 

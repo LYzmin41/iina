@@ -52,6 +52,7 @@ final class MPVFixture {
   func getInt(_ key: String) -> Int { Int(values[key] ?? 0) }
 }
 final class PlayerCore {
+  @discardableResult func performSidebarChange<T>(_ action: () -> T) -> T { action() }
   struct Info { struct State { let active = true }; let state = State() }
   let info = Info(), mpv = MPVFixture()
   func observe(_ key: Notification.Name, _ handler: @escaping (Notification) -> Void) {}

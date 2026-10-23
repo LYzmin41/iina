@@ -84,6 +84,7 @@ class VideoView: NSView {
   func prepareForPIPDisplay(render: Bool = true) {
     dispatchPrecondition(condition: .onQueue(.main))
     guard player.info.state.active, let window else { return }
+    updateDisplayLink()
     layoutSubtreeIfNeeded()
     if videoLayer.contentsScale != window.backingScaleFactor {
       videoLayer.contentsScale = window.backingScaleFactor

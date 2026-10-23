@@ -7,18 +7,28 @@ It also extracts the actual PlayerCore Aspect Ratio/Rotation and track setters,
 video reconfiguration handler and audio track-change handler.
 Playback, preferences, UI refresh and MPV synchronization are fixture boundaries.
 
-Locked windows fit the cropped display aspect starting from the current frame,
-subject to existing minimum and screen limits. Unlocked windows retain their
+Locked windows fit the cropped display aspect inside a retained reference window,
+subject to existing minimum and screen limits. Manual resizing while cropped
+scales both dimensions of that original reference; Reset recovers its proportions
+at the updated scale. Programmatic minimum/screen clamps and intermediate crop
+animation frames cannot replace the reference. Unlocked windows retain their
 freely chosen frame. Checks cover wide/portrait/tiny/uncropped output,
 logical/physical resolution, centering, repeated reconfiguration, fullscreen
 prior geometry, startup sizing of the next file and explicit scale commands.
 A concrete 874×525 → 874×492 case protects against the rejected fixed-frame
 letterboxing behavior. PiP receives the cropped display aspect independently.
+The wide-crop regression rejects area preservation (960×540 → 960×240).
+Further checks cover manual shrink/enlarge, minimum-clamped portrait resizing,
+explicit scale while cropped, repeated transforms and deferred animation targets.
+When a resize removes minimum padding, the original reference follows the fitted
+video scale rather than the padded outer frame; Reset retains that image scale.
 
 `CROP_WINDOW_MAIN_SOURCE=/absolute/path/to/MainWindowController.swift` selects an
-older source for causal comparison. The old fixed-frame implementation fails
-the locked crop-aspect regression (its earlier flag name is normalized only in
-the test fixture). Editor Save/Cancel and filter success/failure integration
+alternative controller source with compatible fixture state. Older revisions
+that predate the reference-window fields need their matching fixture. The
+retained `window-before.log` for the 2026-10-20 reference change records the
+wide-crop assertion failing against the previous area-preserving policy.
+Editor Save/Cancel and filter success/failure integration
 remain in `custom-crop`; these harnesses do not replace physical acceptance.
 
 Transform coverage includes every supported rotation, 4:3/Default/invalid aspect,

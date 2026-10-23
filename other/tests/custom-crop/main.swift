@@ -429,6 +429,7 @@ let crop = box(in: main), width = input("Width in pixels", in: main), height = i
 let picker = selector(in: main)
 check(width.integerValue == 960 && height.integerValue == 540, "fields start at full source dimensions")
 check(button("Save", in: main).isEnabled, "crop confirmation is Save and accepts a full frame")
+check(main.preparedWindowReferences > 0, "Editor entry captures the original window reference before installing preview geometry")
 check(picker.label(forSegment: 0) == "16:9", "native source starts at its actual aspect ratio")
 edit(width, "640", in: main)
 edit(height, "360", in: main)
@@ -483,6 +484,8 @@ check(main.videoView.frame == originalPreview && picker.superview!.frame.midX ==
       "changing numeric ratio labels preserves the preview, centered group, and outer actions")
 crop.setSelectedRect(to: NSRect(x: 101, y: 73, width: 501, height: 301))
 button("Save", in: main).performClick(nil)
+check(main.player.info.unsureCrop == "Custom" && main.player.publishedCropDescriptions.last == "Custom",
+      "Save commits Custom before publishing crop changes to sidebar and menu observers")
 check(main.player.savedCrop?.params == ["x": "101", "y": "166", "w": "501", "h": "301", "exact": "1"],
       "Save uses source pixels with the correct top-origin filter coordinate")
 check(!main.interactiveMode.isActive && main.player.resumedCount == 0 && main.liveText.requests == 1,
@@ -572,6 +575,8 @@ check(restored.player.savedCrop === priorCrop && restored.player.info.unsureCrop
 restored.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
 button("Reset", in: restored).performClick(nil)
 button("Save", in: restored).performClick(nil)
+check(restored.player.info.unsureCrop == "None" && restored.player.publishedCropDescriptions.last == "None",
+      "Reset and Save publish None after removing the crop rather than the previous description")
 check(restored.player.savedCrop == nil && restored.player.info.cropFilter == nil, "saving Reset after reopening a crop keeps the full source")
 restored.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
 check(box(in: restored).selectedRect == NSRect(x: 0, y: 0, width: 960, height: 540), "reopening after Reset and Save selects the entire source instead of a stale crop")
@@ -1862,10 +1867,10 @@ let outsideKeyboardEditor = MainWindowController()
 let otherWindowEscape = editorKey(53, in: outsideKeyboardEditor, time: escapeTime + 0.15)
 check(keyboardEditor.interactiveMode.handleEditorEvent(otherWindowEscape) === otherWindowEscape,
       "crop shortcuts do not consume events belonging to another window")
-keyboardEditor.isCropExitInProgress = true
+keyboardEditor.isCropTransitionInProgress = true
 check(keyboardEditor.interactiveMode.handleEditorEvent(otherWindowEscape) === otherWindowEscape,
       "pending crop exit leaves another player's keyboard events untouched")
-keyboardEditor.isCropExitInProgress = false
+keyboardEditor.isCropTransitionInProgress = false
 let modifiedReturn = editorKey(36, in: keyboardEditor, time: 12, modifiers: .command)
 check(keyboardEditor.interactiveMode.handleEditorEvent(modifiedReturn) === modifiedReturn && keyboardEditor.interactiveMode.isActive,
       "modified Return remains available to existing application bindings")
@@ -1944,6 +1949,7 @@ button("Save", in: rejectedSave).performClick(nil)
 check(rejectedSave.interactiveMode.isActive && rejectedSave.player.info.cropFilter == nil &&
       box(in: rejectedSave).selectedRect == NSRect(x: 20, y: 30, width: 640, height: 300),
       "a rejected crop Save retains the editor and selected pixels for retry")
+check(rejectedSave.player.info.unsureCrop == "None", "A failed crop cannot publish a phantom Custom selection")
 rejectedSave.player.filterAdditionSucceeds = true
 button("Save", in: rejectedSave).performClick(nil)
 check(!rejectedSave.interactiveMode.isActive && rejectedSave.player.info.cropFilter != nil,
@@ -1986,4 +1992,141 @@ staleTrackCrop.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: tru
 staleTrackCrop.interactiveMode.exit(discardingCrop: true)
 check(!staleTrackCrop.interactiveMode.isActive && staleTrackCrop.player.savedCrop == nil && staleTrackCrop.player.scopedCropCancels == 0, "media replacement discards the editor without restoring stale source filters or selection")
 
+let preparingEditor = MainWindowController(size: NSSize(width: 1056, height: 300))
+preparingEditor.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+let preparingBox = box(in: preparingEditor)
+preparingBox.setSelectedRect(to: NSRect(x: 20, y: 30, width: 640, height: 300))
+preparingBox.setZoom(2)
+let previewBeforeSave = preparingBox.previewTransform
+let frameBeforeSave = preparingEditor.videoView.frame
+let selectionBeforeSave = preparingBox.selectedRect
+preparingEditor.exitPreparationObserver = { image, clip, selection, controls, snapshot in
+  let container = preparingEditor.videoViewContainer
+  check(image == container.convert(preparingBox.imageRect, from: preparingBox),
+        "Save captures the zoomed/panned source position without returning through Fit")
+  check(clip == container.convert(preparingBox.previewRect, from: preparingBox),
+        "Save preserves the visible preview aperture before output preparation")
+  check(preparingBox.previewTransform == previewBeforeSave && preparingEditor.videoView.frame == frameBeforeSave,
+        "preparation leaves editor image geometry unchanged")
+  check(selection == selectionBeforeSave && !controls.isEmpty && snapshot != nil,
+        "the selection and native controls are captured together before leaving the editor")
+}
+button("Save", in: preparingEditor).performClick(nil)
+check(!preparingEditor.interactiveMode.isActive, "the prepared editor commits and releases its controls")
+
+let committingEditor = MainWindowController(size: NSSize(width: 900, height: 400))
+committingEditor.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+let committingBox = box(in: committingEditor)
+committingBox.setSelectedRect(to: NSRect(x: 40, y: 30, width: 500, height: 350))
+committingBox.setZoom(2)
+var committedTransform = CATransform3DIdentity
+var committedAperture: CALayer?
+committingEditor.exitPreparationObserver = { image, clip, _, _, _ in
+  let overlay = CropTransitionOverlay(frame: committingEditor.videoViewContainer.bounds)
+  overlay.useNativeVideo(committingEditor.videoView, in: committingEditor.videoViewContainer,
+                         pixelSize: NSSize(width: 960, height: 540))
+  overlay.nativeVideo!.present(frame: image, clip: clip)
+  overlay.nativeVideo!.present(frame: NSRect(x: image.minX - 20, y: image.minY - 10,
+                                            width: image.width * 1.5, height: image.height * 1.5), clip: clip)
+  committedTransform = committingEditor.videoView.layer!.transform
+  committedAperture = committingEditor.videoView.layer!.mask
+  committingEditor.cropExitOverlay = overlay
+}
+button("Save", in: committingEditor).performClick(nil)
+check(!committingEditor.interactiveMode.isActive && committedAperture != nil
+      && committingEditor.videoView.layer!.mask === committedAperture
+      && CATransform3DEqualToTransform(committingEditor.videoView.layer!.transform, committedTransform),
+      "Save teardown cannot reset the live crop transform or aperture while canonical output is still pending")
+committingEditor.cropExitOverlay!.releaseNativeVideo()
+check(CATransform3DIsIdentity(committingEditor.videoView.layer!.transform) && committingEditor.videoView.layer!.mask == nil,
+      "the ready canonical handoff restores player geometry rather than the obsolete zoomed editor")
+committingEditor.cropExitOverlay = nil
+
+func pumpEntry(_ predicate: () -> Bool) {
+  let deadline = Date().addingTimeInterval(3)
+  while !predicate() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.001)) }
+  precondition(predicate(), "native entry geometry did not complete")
+}
+func croppedEntryFixture() -> MainWindowController {
+  let editor = MainWindowController(size: NSSize(width: 1056, height: 300))
+  editor.entryDuration = 0.035
+  _ = editor.player.setCrop(fromFilter: MPVFilter.crop(w: 400, h: 220, x: 20, y: 30))
+  editor.player.mpv.size = NSSize(width: 400, height: 220)
+  return editor
+}
+let entering = croppedEntryFixture()
+let entryWindow = entering.window!.frame
+let nativeLayer = entering.videoView.layer!
+entering.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+check(entering.interactiveMode.isEntering && entering.interactiveMode.isActive && entering.player.info.cropFilter == nil,
+      "entry prepares full output while keeping the existing native video layer live")
+check(entering.videoView.layer === nativeLayer && !entering.videoView.isHidden,
+      "native video is neither replaced nor hidden while output is prepared")
+let enteringOverlays = entering.videoViewContainer.subviews.compactMap { $0 as? CropTransitionOverlay }
+entering.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+check(entering.videoViewContainer.subviews.compactMap { $0 as? CropTransitionOverlay }.count == enteringOverlays.count,
+      "duplicate entry cannot install another motion owner")
+entering.interactiveMode.finishEntryTransition()
+check(entering.interactiveMode.isEntering && !enteringOverlays[0].isFinishing,
+      "entry waits for actual full-source output rather than beginning on an early size event")
+check(entering.window!.frame == entryWindow, "editor preparation retains the established window frame")
+var entryPublishedEditorUI: [Bool] = []
+entering.videoView.videoLayer.didPublishHandoff = {
+  guard entering.interactiveMode.isActive, !entering.interactiveMode.isEntering else { return }
+  entryPublishedEditorUI.append(!box(in: entering).isHiddenOrHasHiddenAncestor &&
+    !button("Save", in: entering).isHiddenOrHasHiddenAncestor)
+}
+entering.player.mpv.size = NSSize(width: 960, height: 540)
+entering.interactiveMode.finishEntryTransition(outputIsReady: true)
+pumpEntry { !entering.interactiveMode.isEntering }
+check(entryPublishedEditorUI == [true],
+      "completed entry publishes the real outline and controls in the same native handoff that retires the overlay")
+entering.videoView.videoLayer.didPublishHandoff = nil
+check(entering.videoView.layer === nativeLayer && entering.interactiveMode.isActive
+      && box(in: entering).selectedRect == NSRect(x: 20, y: 290, width: 400, height: 220),
+      "entry finishes on the same video layer with the saved crop selection")
+check(!box(in: entering).isHidden && entering.player.pausedCount == 0 && entering.player.resumedCount == 0,
+      "entry reveals native controls without changing playback state")
+button("Cancel", in: entering).performClick(nil)
+check(!entering.interactiveMode.isActive && entering.player.info.cropFilter != nil,
+      "Cancel after native entry restores the original crop")
+
+let playingEntry = MainWindowController()
+playingEntry.entryDuration = 0.05
+playingEntry.player.info.state = .playing
+let playingLayer = playingEntry.videoView.layer!
+playingEntry.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+let liveContent = NSImage(size: NSSize(width: 2, height: 2)).cgImage(forProposedRect: nil, context: nil, hints: nil)
+playingLayer.contents = liveContent
+pumpEntry { !playingEntry.interactiveMode.isEntering }
+check(playingEntry.videoView.layer === playingLayer && playingEntry.player.info.state == .playing
+      && playingEntry.player.pausedCount == 0 && playingEntry.player.resumedCount == 0,
+      "playing editor entry keeps native layer identity and never pauses playback")
+playingEntry.interactiveMode.exit()
+
+let failedNativeEntry = croppedEntryFixture()
+failedNativeEntry.player.filterRemovalSucceeds = false
+failedNativeEntry.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+check(!failedNativeEntry.interactiveMode.isActive && !failedNativeEntry.interactiveMode.isEntering
+      && failedNativeEntry.player.info.cropFilter != nil,
+      "failed filter removal leaves no input-blocking transition or partial editor")
+
+let cancelledNativeEntry = croppedEntryFixture()
+cancelledNativeEntry.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+cancelledNativeEntry.interactiveMode.cancelEntryTransition()
+check(!cancelledNativeEntry.interactiveMode.isEntering && cancelledNativeEntry.interactiveMode.isActive
+      && !box(in: cancelledNativeEntry).isHidden && !cancelledNativeEntry.videoView.videoLayer.isAnimatingWindowResize,
+      "cancelling preparation restores native editor geometry and controls")
+cancelledNativeEntry.interactiveMode.exit(discardingCrop: true)
+
+for failure in ["generation", "stopped"] {
+  let editor = croppedEntryFixture()
+  editor.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true)
+  if failure == "generation" { editor.player.info.trackSelectionGeneration += 1 }
+  else { editor.player.info.state = .stopped }
+  editor.interactiveMode.finishEntryTransition(outputIsReady: true)
+  check(!editor.interactiveMode.isEntering && !editor.videoView.videoLayer.isAnimatingWindowResize,
+        "\(failure) cannot complete stale native entry motion")
+  editor.interactiveMode.exit(discardingCrop: true)
+}
 print("Completed \(checks) custom crop checks using production controller, selection view, and scrolling selector.")

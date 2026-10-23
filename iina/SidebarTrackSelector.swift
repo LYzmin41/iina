@@ -297,12 +297,14 @@ class TrackSelector: SidebarSectionScrollView, NSTableViewDelegate, NSTableViewD
     let active = player.info.activeTrackIDs(trackType)
     let ids = selection.select(id, action: action, active: active)
     var applied = true
-    if trackType == .audio {
-      if ids != active { applied = player.setAudioTracks(ids) }
-    } else if trackType == .video {
-      if ids != active { applied = player.setVideoTracks(ids, order: selection.order) }
-    } else {
-      player.setTrack(id, forType: trackType)
+    player.performSidebarChange {
+      if trackType == .audio {
+        if ids != active { applied = player.setAudioTracks(ids) }
+      } else if trackType == .video {
+        if ids != active { applied = player.setVideoTracks(ids, order: selection.order) }
+      } else {
+        player.setTrack(id, forType: trackType)
+      }
     }
     if !applied { selection = previous }
     if applied, previous.anchor != selection.anchor || selection.anchor == nil {
@@ -409,7 +411,10 @@ class TrackSelector: SidebarSectionScrollView, NSTableViewDelegate, NSTableViewD
       cell.setLanguage(track.readableLanguage)
       cell.setRemoval(track.isExternal && (trackType == .audio || trackType == .video)) { [weak self] in
         guard let self else { return }
-        if self.player.removeExternalTrack(track.id, type: self.trackType, order: self.selection.order) {
+        let removed = self.player.performSidebarChange {
+          self.player.removeExternalTrack(track.id, type: self.trackType, order: self.selection.order)
+        }
+        if removed {
           self.reloadTracks()
         }
       }

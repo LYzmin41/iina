@@ -6,7 +6,95 @@
 //  Copyright © 2026 lhc. All rights reserved.
 //
 
+import Cocoa
+
 fileprivate let ui = UIHelper.shared
+
+/// Native parameter field shared by the player sidebars.
+final class SidebarInputField: NSTextField {
+  var emptyValue = "0"
+  private var inputFocusMonitor: Any?
+  private var isSendingAction = false
+
+  override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    configure()
+  }
+
+  required init?(coder: NSCoder) {
+    super.init(coder: coder)
+    configure()
+  }
+
+  private func configure() {
+    translatesAutoresizingMaskIntoConstraints = false
+    usesSingleLineMode = true
+    bezelStyle = .roundedBezel
+    focusRingType = .exterior
+    cell?.sendsActionOnEndEditing = true
+  }
+
+  override func becomeFirstResponder() -> Bool {
+    let accepted = super.becomeFirstResponder()
+    if accepted {
+      // AppKit places the caret after acquiring the shared field editor.
+      DispatchQueue.main.async { [weak self] in self?.currentEditor()?.selectAll(nil) }
+    }
+    return accepted
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    super.mouseDown(with: event)
+    currentEditor()?.selectAll(nil)
+  }
+
+  private func normalizeEmpty(_ editor: NSText?) {
+    let text = editor?.string ?? stringValue
+    guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    stringValue = emptyValue
+    editor?.string = emptyValue
+  }
+
+  override func textShouldEndEditing(_ textObject: NSText) -> Bool {
+    normalizeEmpty(textObject)
+    return super.textShouldEndEditing(textObject)
+  }
+
+  override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
+    guard !isSendingAction else { return false }
+    isSendingAction = true
+    defer { isSendingAction = false }
+    normalizeEmpty(currentEditor())
+    return super.sendAction(action, to: target)
+  }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    if let inputFocusMonitor { NSEvent.removeMonitor(inputFocusMonitor) }
+    inputFocusMonitor = nil
+    guard window != nil else { return }
+    // Video and sidebar background clicks do not normally transfer focus.
+    inputFocusMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+      guard let self else { return event }
+      return self.routeInputFocus(for: event)
+    }
+  }
+
+  private func routeInputFocus(for event: NSEvent) -> NSEvent? {
+    guard let window, event.window === window, let editor = currentEditor() else { return event }
+    if bounds.contains(convert(event.locationInWindow, from: nil)) {
+      // Further clicks hit AppKit's field editor, bypassing this control's mouseDown.
+      editor.selectAll(nil)
+      return nil
+    }
+    window.makeFirstResponder(nil)
+    return event
+  }
+
+  deinit {
+    if let inputFocusMonitor { NSEvent.removeMonitor(inputFocusMonitor) }
+  }
+}
 
 
 class SidebarSliderView: NSView {
@@ -15,8 +103,7 @@ class SidebarSliderView: NSView {
   var notificationKey: Notification.Name { .init("") }
   var slider: NSSlider!
   var tickMarkTextFieldsConstraints: [NSLayoutConstraint] = []
-  var input: NSTextField!
-  private var inputContainer: ColoredView!
+  var input: SidebarInputField!
   var indicator: NSTextField!
   var indicatorConstraint: NSLayoutConstraint!
 
@@ -45,25 +132,9 @@ class SidebarSliderView: NSView {
     indicator.font = .systemFont(ofSize: 10)
     indicator.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-    self.input = NSTextField()
-    input.translatesAutoresizingMaskIntoConstraints = false
-    input.usesSingleLineMode = true
-    input.isBezeled = false
-    input.isBordered = false
-    input.drawsBackground = false
-    input.backgroundColor = .clear
+    self.input = SidebarInputField()
     input.target = self
     input.action = #selector(customEditFinishedAction_)
-
-    inputContainer = ColoredView(color: .labelColor.withAlphaComponent(0.08), cornerRadius: 6)
-    inputContainer.translatesAutoresizingMaskIntoConstraints = false
-    inputContainer.addSubview(input)
-    NSLayoutConstraint.activate([
-      input.leadingAnchor.constraint(equalTo: inputContainer.leadingAnchor, constant: 6),
-      input.trailingAnchor.constraint(equalTo: inputContainer.trailingAnchor, constant: -6),
-      input.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
-      inputContainer.heightAnchor.constraint(equalToConstant: 24)
-    ])
 
     var titleViews = [
       ui.image(titleImage, size: 16, scaleUp: false) as NSView,
@@ -101,7 +172,7 @@ class SidebarSliderView: NSView {
     if showsTitle { addSubview(labelStack) }
     addSubview(slider)
     addSubview(indicator)
-    addSubview(inputContainer)
+    addSubview(input)
     addSubview(tickMarkView)
 
     indicator.padding(.horizontal(greaterThan: 0))
@@ -115,12 +186,12 @@ class SidebarSliderView: NSView {
     if showsTitle {
       labelStack.padding(.horizontal, .top)
       slider.spacing(.top(18), to: labelStack)
-      inputContainer.padding(.trailing)
+      input.padding(.trailing)
     } else {
       slider.padding(.top(18))
-      inputContainer.padding(.trailing)
+      input.padding(.trailing)
     }
-    inputContainer.spacing(.leading(8), to: slider).center(.y, with: slider).size(width: inputWidth)
+    input.spacing(.leading(8), to: slider).center(.y, with: slider).size(width: inputWidth, height: 24)
     tickMarkView.padding(.leading, .bottom)
 
     tickMarkView.widthAnchor.constraint(equalTo: slider.widthAnchor, multiplier: 1).isActive = true
@@ -170,11 +241,11 @@ class SidebarSliderView: NSView {
   }
 
   @objc private func sliderAction_(_ sender: NSSlider) {
-    sliderAction()
+    player.performSidebarChange { sliderAction() }
   }
 
   @objc private func customEditFinishedAction_(_ sender: NSTextField) {
-    customEditFinishedAction()
+    player.performSidebarChange { customEditFinishedAction() }
   }
 
   func setup() {}

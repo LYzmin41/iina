@@ -58,6 +58,7 @@ class TrackInfoFixture {
   func currentTrack(_ type: MPVTrack.TrackType) -> MPVTrack? { nil }
 }
 class PlayerCore {
+  @discardableResult func performSidebarChange<T>(_ action: () -> T) -> T { action() }
   let info = TrackInfoFixture()
   var trackChanges = 0
   func setAudioTracks(_ ids: Set<Int>) -> Bool { trackChanges += 1; return true }
