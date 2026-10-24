@@ -46,6 +46,8 @@ class SidebarAudioPane: SidebarScrollView {
   }
 
   @objc private func loadExternalAudioAction(_ sender: NSButton) {
+    guard player.info.state.loaded else { return }
+    let generation = player.info.trackSelectionGeneration
     let currentDir = player.info.currentURL?.deletingLastPathComponent()
     Utility.quickOpenPanel(
       title: ui.localized("sidebar.add_audio_track"),
@@ -53,8 +55,10 @@ class SidebarAudioPane: SidebarScrollView {
       dir: currentDir,
       sheetWindow: player.currentWindow,
       allowedFileTypes: Utility.playableFileExt
-    ) { url in
-      self.player.loadExternalAudioFile(url)
+    ) { [weak player] url in
+      guard let player, player.info.state.loaded,
+            player.info.trackSelectionGeneration == generation else { return }
+      player.loadExternalAudioFile(url)
     }
   }
 
@@ -155,7 +159,7 @@ fileprivate class EqualizerView: NSView, NSMenuDelegate {
 
   private lazy var audioEQSliders: [NSSlider] = {
     (0...9).map {
-      let slider = NSSlider()
+      let slider = AccentSlider()
       slider.controlSize = .mini
       slider.isVertical = true
       slider.minValue = -12

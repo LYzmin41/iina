@@ -13,7 +13,7 @@ def extract(text, marker):
 def section(text,start,end): return text[text.index(start):text.index(end,text.index(start))]
 base=(tests/'NativeHarness.swift').read_text()
 base=base[:base.index('  func verify() {')]
-base='import Cocoa\n' + extract((repo/'iina/MainWindow.swift').read_text(), 'struct WindowResizeSession {') + '\n' + base
+base='import Cocoa\n' + base
 base=base.replace('class NativeScaleHarness {','class NativeScaleHarness {\n  var oscSliderView: NSView!\n  var loaded = true\n  var interactiveMode = LayoutInteractiveMode()\n  var minimumWindowSize: NSSize { AppData.floatingOSCWindowMinSize }\n  var currentWindowAspectRatio: NSSize { nativeWindow.aspectRatio }\n  func windowFrameConstrainedToScreen(_ frame: NSRect, screenFrame: NSRect?) -> NSRect { frame }\n  var window: NSWindow? { nativeWindow }\n  let player = LayoutPlayerStub()\n  let liveText = LayoutLiveTextStub()\n  let videoView = LayoutVideoViewStub()\n  var mpvUpdateCalls = 0\n  func updateWindowParametersForMPV() { mpvUpdateCalls += 1 }\n  var playSlider: NSSlider! = NSSlider()\n  @objc func leftButtonAction() {}\n  @objc func rightButtonAction() {}\n  var currentControlBar: NSView?\n  var oscFloatingView = TestPanel()\n  let nativeWindow = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 900, height: 506), styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)\n')
 base=base.replace('  var loaded = true', '  var loaded = true\n  var windowResizeSession: WindowResizeSession?\n  var isCropTransitionInProgress = false\n  func setWindowAspectRatio(_ size: NSSize) { nativeWindow.aspectRatio = size }\n  func rememberVideoTransformWindowResize() {}')
 start=base.index('  init() {'); end=base.index('// PRODUCTION_METHODS')
@@ -66,5 +66,6 @@ panel=panel.replace('// QUICK_CONSTRAINTS',section((repo/'iina/Utility.swift').r
 panel=panel.replace('// PANEL_SETUP',section(osc,'    self.oscTopView = NSStackView()','    prefObserver.add(.useLiquidGlassOSC'))
 panel += '\nenum AppData {\n' + '\n'.join(line for line in (repo/'iina/AppData.swift').read_text().splitlines() if 'static let floatingOSCWindowMinSize =' in line) + '\n}\n'
 panel += '\nextension NSSize {\n' + extract((repo/'iina/Extensions.swift').read_text(), '  var aspect: CGFloat {') + '\n' + extract((repo/'iina/Extensions.swift').read_text(), '  func grow(toSize size:') + '\n}\n'
+panel += '\n' + extract((repo/'iina/MainWindow.swift').read_text(), 'struct WindowResizeSession {') + '\n'
 files=['iina/TranslucentView.swift','iina/ConstraintsSugar.swift','iina/TimeLabelOverflowedStackView.swift','iina/TimeLabelOverflowedView.swift']
 (output/'main.swift').write_text(base[:base.index('struct Preference')]+(tests/'LayoutSupport.swift').read_text()+panel+'\n'+ '\n'.join((repo/f).read_text() for f in files)+'\n'+base[base.index('struct Preference'):])

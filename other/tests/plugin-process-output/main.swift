@@ -1,3 +1,8 @@
+import Foundation
+import JavaScriptCore
+
+// PRODUCTION_HELPERS
+
 enum Permission { case accessFileSystem }
 enum Utility {
   static let binariesURL = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -22,7 +27,7 @@ class Fixture: NSObject {
   func createPromise(_ block: @escaping @convention(block) (JSValue, JSValue) -> Void) -> JSValue {
     context.objectForKeyedSubscript("Promise")!.construct(withArguments: [JSValue(object: block, in: context)!])
   }
-  // PRODUCTION_EXEC
+// PRODUCTION_EXEC
 }
 
 final class Result {
@@ -73,6 +78,11 @@ func execute(_ fixture: Fixture, file: String = "/bin/sh", args: [String], hooks
   return result
 }
 let fixture = Fixture()
+let system = execute(fixture, file: "printf", args: ["%s", "space 'quote' $literal; & tail"])
+check(system.resolved && (system.value as? [String: Any])?["status"] as? Int == 0,
+      "unqualified system executable resolves without an empty launch path")
+check((system.value as? [String: Any])?["stdout"] as? String == "space 'quote' $literal; & tail",
+      "system command arguments remain literal without a shell")
 let small = execute(fixture, args: ["-c", "printf 'out-tail'; printf 'err-tail' >&2; exit 7"])
 let smallValue = small.value as! [String: Any]
 check(small.resolved && smallValue["status"] as? Int == 7, "nonzero exit remains a resolved process result")

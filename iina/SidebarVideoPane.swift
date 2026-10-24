@@ -62,14 +62,18 @@ class SidebarVideoPane: SidebarScrollView {
   }
 
   @objc private func loadExternalVideoAction(_ sender: NSButton) {
+    guard player.info.state.loaded else { return }
+    let generation = player.info.trackSelectionGeneration
     Utility.quickOpenPanel(
       title: ui.localized("sidebar.add_video_track"),
       chooseDir: false,
       dir: player.info.currentURL?.deletingLastPathComponent(),
       sheetWindow: player.currentWindow,
       allowedFileTypes: Utility.supportedFileExt[.video]
-    ) { url in
-      self.player.loadExternalVideoFile(url)
+    ) { [weak player] url in
+      guard let player, player.info.state.loaded,
+            player.info.trackSelectionGeneration == generation else { return }
+      player.loadExternalVideoFile(url)
     }
   }
 
@@ -108,7 +112,7 @@ class SidebarVideoPane: SidebarScrollView {
   }
 
   private func createSwitchesView() -> NSView {
-    let hdrSwitch = NSSwitch()
+    let hdrSwitch = AccentSwitch()
     if #available(macOS 26, *) {
       hdrSwitch.controlSize = .small
     }
@@ -149,7 +153,7 @@ class SidebarVideoPane: SidebarScrollView {
     return stack
   }
 
-  @objc private func hdrAction(_ sender: NSSwitch) {
+  @objc private func hdrAction(_ sender: AccentSwitch) {
     player.performSidebarChange {
       player.info.hdrEnabled = sender.state == .on
       player.refreshEdrMode()
@@ -306,14 +310,14 @@ fileprivate class HorizontalScrollViewWithIndicator: NSView {
 
 fileprivate class AspectRatioView: HorizontalScrollViewWithIndicator {
   private unowned let player: PlayerCore
-  private var segmentControl: NSSegmentedControl!
+  private var segmentControl: AccentSegmentedControl!
   private var input: NSTextField!
 
   init(player: PlayerCore) {
     self.player = player
     super.init(frame: .zero)
 
-    self.segmentControl = NSSegmentedControl(
+    self.segmentControl = AccentSegmentedControl(
       labels: [ui.localized("quicksetting.item_default")] + AppData.aspectsInPanel.dropFirst(1),
       trackingMode: .selectOne,
       target: self, action: #selector(aspectRatioAction)
@@ -376,13 +380,13 @@ fileprivate class AspectRatioView: HorizontalScrollViewWithIndicator {
 
 fileprivate class CropView: HorizontalScrollViewWithIndicator {
   private unowned let player: PlayerCore
-  private var segmentControl: NSSegmentedControl!
+  private var segmentControl: AccentSegmentedControl!
 
   init(player: PlayerCore) {
     self.player = player
     super.init(frame: .zero)
 
-    self.segmentControl = NSSegmentedControl(
+    self.segmentControl = AccentSegmentedControl(
       labels: [ui.localized("quicksetting.item_none")] + AppData.cropsInPanel.dropFirst(1) + [ui.localized("menu.crop_custom")],
       trackingMode: .selectOne,
       target: self, action: #selector(cropAction)
@@ -438,7 +442,7 @@ fileprivate class CropView: HorizontalScrollViewWithIndicator {
 
 fileprivate class RotationView: NSView {
   private unowned let player: PlayerCore
-  private var segmentControl: NSSegmentedControl!
+  private var segmentControl: AccentSegmentedControl!
 
   init(player: PlayerCore) {
     self.player = player
@@ -446,7 +450,7 @@ fileprivate class RotationView: NSView {
 
     translatesAutoresizingMaskIntoConstraints = false
 
-    self.segmentControl = NSSegmentedControl(
+    self.segmentControl = AccentSegmentedControl(
       labels: AppData.rotations.map { "\($0)°" },
       trackingMode: .selectOne,
       target: self, action: #selector(rotationAction)
@@ -487,7 +491,7 @@ fileprivate class RotationView: NSView {
 }
 
 
-fileprivate class HwdecSwitch: NSSwitch {
+fileprivate class HwdecSwitch: AccentSwitch {
   private unowned let player: PlayerCore
 
   init(player: PlayerCore) {
@@ -586,7 +590,6 @@ fileprivate class SpeedView: SidebarSliderView {
 
   private func updateSpeed(to inputSpeed: Double) {
     let newSpeed = constrainSpeed(inputSpeed)
-    print("newSpeed: \(newSpeed)")
     slider.doubleValue = convertSpeedToSliderValue(newSpeed)
     input.doubleValue = newSpeed
     if player.info.playSpeed != newSpeed {
@@ -960,7 +963,7 @@ fileprivate class EqualizerView: NSView {
     for c in configs {
       let label = ui.label("sidebar.\(c.labelKey)", font: .boldSystemFont(ofSize: 12), canCompress: false)
 
-      let slider = NSSlider()
+      let slider = AccentSlider()
       slider.tag = c.tag
       slider.controlSize = .small
       slider.minValue = -100

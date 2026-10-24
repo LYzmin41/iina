@@ -200,3 +200,21 @@ check(rolePlayer.mpv.values.filter { !$0.key.hasPrefix("secondary-") } == primar
 check(popup.segmentCount == 2 && popup.segmentDistribution == .fillEqually && popup.label(forSegment: 0) == "sidebar.primary" && popup.label(forSegment: 1) == "sidebar.secondary", "role selector has two persistent equally sized segments")
 check(styleViews.allSatisfy { !($0 is CircularActionButton) }, "Style has no per-setting reset circles")
 print("Completed \(checks) production subtitle settings checks.")
+
+let stockPlayer = PlayerCore()
+stockPlayer.mpv.supportsIndependentSecondarySubtitleStyle = false
+stockPlayer.resetSubtitleStyle()
+let stockValues = stockPlayer.mpv.values
+let stockStrings = stockPlayer.mpv.strings
+stockPlayer.resetSubtitleStyle(forPrimary: false)
+stockPlayer.setSubTextSize(70, forPrimary: false)
+stockPlayer.setSubScale(2, forPrimary: false)
+stockPlayer.setSubFont("Unsupported write", forPrimary: false)
+stockPlayer.setSubTextColor("1/0/0/1", forPrimary: false)
+check(stockPlayer.mpv.values == stockValues && stockPlayer.mpv.strings == stockStrings,
+      "stock engine ignores unsupported independent Secondary style writes and resets")
+private let stockStyle = SubStyleView(player: stockPlayer)
+stockStyle.setPrimary(false)
+stockStyle.resetStyle()
+check(stockPlayer.mpv.values == stockValues && stockPlayer.mpv.strings == stockStrings,
+      "switching to unsupported Secondary Style cannot mutate Primary or engine properties")

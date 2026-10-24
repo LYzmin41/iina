@@ -105,7 +105,7 @@ final class TrackSettingsPopUp: SettingsTargetPopUp, NSMenuDelegate {
 }
 
 /// Subtitle settings target the two display roles, independently of source IDs.
-final class SubtitleRoleSelector: NSSegmentedControl {
+final class SubtitleRoleSelector: AccentSegmentedControl {
   var onChange: ((Bool) -> Void)?
   var isPrimary: Bool { selectedSegment == 0 }
 
@@ -135,7 +135,7 @@ final class SubtitleRoleSelector: NSSegmentedControl {
   }
 }
 
-/// The bundled engine keeps secondary subtitle styles independent when enabled.
+/// Option names for primary styles and the optional independent secondary styles.
 enum SubtitleStyle {
   static let options = ["sub-scale", "sub-font", "sub-font-size", "sub-color",
                         "sub-outline-size", "sub-outline-color", "sub-back-color"]
@@ -504,6 +504,7 @@ struct ScopedTrackCropPreview {
 
 extension PlayerCore {
   func openScopedCustomCrop() {
+    guard mainWindow.interactiveMode.canEnter else { return }
     mainWindow.prepareVideoTransformWindowReference()
     let id = scopedTrackSettings.target(.videoGeometry)
     guard id != 0 else { mainWindow.interactiveMode.enter(mode: .crop, selectWholeVideoByDefault: true); return }
@@ -568,4 +569,3 @@ extension PlayerCore {
     return true
   }
 }
-

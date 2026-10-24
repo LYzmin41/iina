@@ -1,4 +1,5 @@
 let app = NSApplication.shared
+app.setActivationPolicy(.prohibited)
 var count=0
 func check(_ value: @autoclosure () -> Bool, _ name: String) {
  precondition(value(),name);count += 1
@@ -133,4 +134,120 @@ check(overlap.operationFeedbackToken == overlapClock,"transfer preserves pending
 overlap.exitPIP(); overlap.pipDidClose(overlap.pip)
 check(overlap.operationFeedbackView?.superview === overlap.videoViewContainer,"pending feedback follows return")
 overlap.endOperationFeedback(captureInPlayer)
+// The editor owns the native layer's projection and an uncommitted source.
+// PiP must release that ownership before its first handoff, on both APIs.
+for modern in [false, true] {
+ for editor in ["crop", "delogo"] {
+  PiP.modern = modern
+  let c = MainWindowController()
+  c.videoView.wantsLayer = true
+  let mask = CALayer()
+  c.videoView.layer!.mask = mask
+  c.videoView.layer!.transform = CATransform3DMakeScale(0.7, 0.7, 1)
+  c.standardWindowButtons[0].isEnabled = false
+  c.interactiveMode.isActive = true
+  c.interactiveMode.onExit = {
+   check(c.videoView.superview === c.videoViewContainer, "\(editor) exits in its original container")
+   c.videoView.layer!.mask = nil
+   c.videoView.layer!.transform = CATransform3DIdentity
+   c.standardWindowButtons[0].isEnabled = true
+  }
+  c.videoView.beforeHandoff = {
+   check(!c.interactiveMode.isActive, "\(editor) releases ownership before PiP draws")
+   check(c.videoView.layer!.mask == nil && CATransform3DIsIdentity(c.videoView.layer!.transform), "PiP receives the restored player projection")
+   check(c.standardWindowButtons[0].isEnabled, "editor controls are restored before PiP")
+  }
+  c.enterPIP()
+  c.pip.completion?()
+  check(c.interactiveMode.exitCalls == 1, "PiP exits \(editor) exactly once")
+  c.enterPIP()
+  check(c.interactiveMode.exitCalls == 1, "duplicate PiP entry cannot exit the editor again")
+  c.videoView.beforeHandoff = nil
+  c.interactiveMode.onExit = nil
+  c.exitPIP(); c.pipDidClose(c.pip)
+ }
+}
+for modern in [false, true] {
+ PiP.modern = modern
+ let c = MainWindowController()
+ c.isCropTransitionInProgress = true
+ var commits = 0
+ c.onCancelCropTransition = {
+  check(c.videoView.superview === c.videoViewContainer, "pending crop commits before reparenting")
+  commits += 1
+ }
+ c.videoView.beforeHandoff = {
+  check(!c.isCropTransitionInProgress && commits == 1, "PiP releases a Custom Crop exit transition before drawing")
+ }
+ c.enterPIP(); c.pip.completion?()
+ c.videoView.beforeHandoff = nil
+ c.onCancelCropTransition = nil
+ c.exitPIP(); c.pipDidClose(c.pip)
+}
+for modern in [false, true] {
+ PiP.modern = modern
+ for blocked in ["loading", "stopped", "shutdown", "no-video", "music", "unloaded-window",
+                 "fullscreen-animation", "foreign-host", "detached-video", "missing-window"] {
+  let c = MainWindowController()
+  let originalWindow = c.window!
+  var foreignHost: NSWindow?
+  switch blocked {
+  case "loading": c.player.info.state = .loading
+  case "stopped": c.player.info.state = .stopped
+  case "shutdown": c.player.info.state = .shutDown
+  case "no-video": c.player.info.videoTrackIDs = []
+  case "music": c.player.isInMiniPlayer = true
+  case "unloaded-window": c.loaded = false
+  case "fullscreen-animation": c.isFullscreenTransitionInProgress = true
+  case "foreign-host":
+   let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+                       styleMask: .borderless, backing: .buffered, defer: false)
+   host.isReleasedWhenClosed = false; foreignHost = host
+   c.videoView.removeFromSuperview(); host.contentView!.addSubview(c.videoView)
+  case "detached-video": c.videoView.removeFromSuperview()
+  default: c.window = nil
+  }
+  let originalHost = c.videoView.superview
+  c.interactiveMode.isActive = true
+  for _ in 0..<3 { c.enterPIP() }
+  check(c.pipStatus == .notInPIP && c.pip.presented == 0 && c.pipVideo == nil &&
+        c.operationFeedbackRequests.isEmpty && !c.videoView.videoLayer.isHostedInPIP &&
+        c.videoView.superview === originalHost && c.interactiveMode.exitCalls == 0,
+        "\(blocked) rejects \(modern ? "modern" : "legacy") PiP before editor, feedback or host mutations")
+  withExtendedLifetime((originalWindow, foreignHost)) {}
+ }
+}
+PiP.modern = true
+for invalidation in ["loading", "stopped", "shutdown", "no-video", "music", "fullscreen-animation", "new-file", "foreign-host"] {
+ let c = MainWindowController()
+ let source = c.window as! Window
+ c.enterPIP()
+ let prepared = c.pip.completion!
+ var foreignHost: NSWindow?
+ switch invalidation {
+ case "loading": c.player.info.state = .loading
+ case "stopped": c.player.info.state = .stopped
+ case "shutdown": c.player.info.state = .shutDown
+ case "no-video": c.player.info.videoTrackIDs = []
+ case "music": c.player.isInMiniPlayer = true
+ case "fullscreen-animation": c.isFullscreenTransitionInProgress = true
+ case "new-file": c.player.info.trackSelectionGeneration += 1
+ default:
+  let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+                      styleMask: .borderless, backing: .buffered, defer: false)
+  host.isReleasedWhenClosed = false; foreignHost = host
+  c.videoView.removeFromSuperview(); host.contentView!.addSubview(c.videoView)
+ }
+ let hostBeforeCallback = c.videoView.superview
+ prepared()
+ check(c.pipStatus == .intermediate && c.pip.dismissed == 1 && !c.videoView.videoLayer.isHostedInPIP &&
+       c.operationFeedbackRequests.isEmpty && source.testVisible && c.videoView.superview === hostBeforeCallback,
+       "\(invalidation) during native preparation cancels before moving or hiding the live video")
+ prepared()
+ check(c.pip.dismissed == 1, "repeated invalidated preparation does not repeat dismissal")
+ c.pipDidClose(c.pip)
+ check(c.pipStatus == .notInPIP && c.videoView.superview === c.videoViewContainer,
+       "invalidated native preparation can finish ordinary ownership cleanup")
+ withExtendedLifetime(foreignHost) {}
+}
 print("Native PiP production-method checks passed: \(count)")

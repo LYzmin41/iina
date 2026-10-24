@@ -869,11 +869,11 @@
 "settings.scaleRemainingTime.label" = "Показывать с учетом скорости воспроизведения";
 "settings.showChapterPos.label" = "Показывать метки глав на ползунке воспроизведения";
 "settings.showRemainingTime.label" = "Показывать оставшееся время";
-"settings.themeMaterial.desc" = "Оформление";
-"settings.themeMaterial.items.0" = "Темное";
-"settings.themeMaterial.items.2" = "Светлое";
-"settings.themeMaterial.items.4" = "Как в системе";
-"settings.themeMaterial.label" = "Внешний вид";
+"settings.themeMaterial.desc" = "Тема";
+"settings.themeMaterial.items.0" = "Тёмная";
+"settings.themeMaterial.items.2" = "Светлая";
+"settings.themeMaterial.items.4" = "Системная";
+"settings.themeMaterial.label" = "Тема";
 "settings.thumbnailWidth.desc" = "Изменение ширины очищает кэш эскизов и пересоздает все эскизы в указанном размере.";
 "settings.thumbnailWidth.label" = "Ширина миниатюр";
 "settings.togglePipByMinimizingWindow.label" = "Переходить в режим «Картинка в картинке» при сворачивании / разворачивании окна";
@@ -1093,3 +1093,31 @@
 "sidebar.style" = "Стиль";
 
 "sidebar.adjustments" = "Корректировки";
+
+/* Native accent color policy */
+"settings.useSystemAccentColor.label" = "Использовать акцентный цвет macOS";
+"settings.accentColorSource.label" = "Акцентный цвет";
+"settings.accentColorSource.items.0" = "Стандартный";
+"settings.accentColorSource.items.1" = "Системный акцент";
+"settings.accentColorSource.items.2" = "Системное выделение";
+"settings.accentColorSource.items.3" = "Свой цвет…";
+"settings.accentColorSource.help.0" = "Использовать стандартный синий акцент.";
+"settings.accentColorSource.help.1" = "Использовать «Цвет» из настроек «Оформление» macOS.";
+"settings.accentColorSource.help.2" = "Использовать цвет выделения текста из настроек «Оформление» macOS.";
+"settings.accentColorSource.help.3" = "Использовать свой цвет в плеере и совместимых плагинах.";
+"settings.accentColorSource.custom.edit" = "Изменить свой цвет…";
+"settings.accentColorSource.custom.help" = "Изменить свой цвет плеера (%@), используемый также совместимыми плагинами.";
+"settings.accentColorSource.custom.color" = "Цвет";
+"settings.accentColorSource.custom.title" = "Свой акцентный цвет";
+"settings.accentColorSource.custom.message" = "Выбери цвет и нажми «Применить цвет».";
+"settings.accentColorSource.custom.apply" = "Применить цвет";
+"settings.accentColorSource.custom.cancel" = "Отмена";
+"alert.system_accent_restart.title" = "Требуется перезапуск";
+"alert.system_accent_restart.message" = "Изменения акцентного цвета вступят в силу после перезапуска приложения.";
+"alert.system_accent_restart.restart" = "Перезапустить";
+"alert.system_accent_restart.later" = "Позже";
+
+"alert.settings_restart.title" = "Требуется перезапуск";
+"alert.settings_restart.message" = "Перезапусти приложение, чтобы применить изменение ко всем окнам плеера.";
+"alert.settings_restart.restart" = "Перезапустить";
+"alert.settings_restart.later" = "Позже";

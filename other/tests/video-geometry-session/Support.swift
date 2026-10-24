@@ -20,6 +20,11 @@ enum MPVOption {
   enum Window { static let windowScale = "window-scale" }
 }
 enum MPVProperty { static let vf = "vf", af = "af" }
+enum AppRestartSession {
+  enum PlaybackState {
+    // PRODUCTION_RESTART_OPTION_NAMES
+  }
+}
 enum AppData {
   static let cropsInPanel = ["None", "4:3", "16:9", "16:10", "21:9", "5:4"]
   static let aspects = ["4:3", "5:4", "16:9", "16:10", "1:1", "3:2", "2.21:1", "2.35:1", "2.39:1"]
@@ -48,7 +53,7 @@ class MPVFixture {
   }
 }
 class InfoFixture {
-  struct State { var loaded = true }
+  struct State { var loaded = true; var active = true }
   var state = State()
   var currentURL: URL?
   var justStartedFile = false, justOpenedFile = false
@@ -61,7 +66,7 @@ class InfoFixture {
   var activeVideo: Set<Int> = [1]
   func activeTrackIDs(_ type: MPVTrack.TrackType) -> Set<Int> { activeVideo }
 }
-class InteractiveFixture { var onExit: (() -> Void)?; func exit() { onExit?(); onExit = nil } }
+class InteractiveFixture { var isActive = false; var onExit: (() -> Void)?; func exit() { onExit?(); onExit = nil } }
 class WindowFixture {
   func prepareVideoTransformWindowReference() {}
   var loaded = true
@@ -78,6 +83,10 @@ class PlayerFixture {
   var mainWindow: WindowFixture! = WindowFixture()
   var scopedTrackSettings = TrackProcessingState()
   var defaultVideoGeometry: MediaVideoGeometryState?
+  var restartOptionDefaults: [String: String]?
+  var restartSelectionDefaults: [String: String] = [:]
+  var restartVideoFilterDefault: String?
+  var restartAudioFilterDefault: String?
   var videoGeometrySession: [URL: MediaVideoGeometryState] = [:]
   var videoGeometryMediaURL: URL?
   var videoGeometryIsLoaded = false
@@ -95,6 +104,10 @@ class PlayerFixture {
   }
   func interactiveVideoGeometry(uncropped: Bool) -> CropVideoGeometry { geometryReads += 1; return geometry }
   @discardableResult func setCrop(fromFilter filter: MPVFilter) -> Bool { info.cropFilter = filter; return true }
+  func addVideoFilter(_ filter: MPVFilter) -> Bool { mpv.videoFilters.append(filter); return true }
+  func removeVideoFilter(_ filter: MPVFilter) -> Bool {
+    mpv.videoFilters.removeAll { $0.isEqual(filter) }; return true
+  }
   func removeCropFilter() { info.cropFilter = nil; info.unsureCrop = "None" }
   private func applyCropChange(_ filter: MPVFilter?, description: String, outputSize: NSSize?) {
     if let filter { if setCrop(fromFilter: filter) { info.unsureCrop = description } }

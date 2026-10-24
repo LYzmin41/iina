@@ -1,4 +1,7 @@
 import Cocoa
+typealias AccentSegmentedControl = NSSegmentedControl
+typealias AccentSlider = NSSlider
+
 struct LayoutValue {
   let value: CGFloat
   init(_ value: CGFloat) { self.value = value }
@@ -18,6 +21,7 @@ extension Notification.Name {
   static let iinaAudioDelayChanged = Self("audio-delay")
   static let iinaTrackSettingsChanged = Self("track-settings")
   static let iinaSubScaleChanged = Self("sub-scale")
+  static let iinaSubFontChanged = Self("sub-font")
   static let iinaSubtitleStyleChanged = Self("sub-style")
   static let iinaSubDelayChanged = Self("sub-delay")
   static let iinaSubPositionChanged = Self("sub-pos")
@@ -42,6 +46,7 @@ enum Preference {
   static func float(for key: Key) -> Float { (configured[key] ?? defaultPreference[key]) as! Float }
 }
 final class MPVFixture {
+  var supportsIndependentSecondarySubtitleStyle = true
   var values: [String: Double] = ["sub-delay": 0.5, "secondary-sub-delay": -0.7, "sub-pos": 90, "secondary-sub-pos": 10, "audio-delay": 0.25]
   var strings: [String: String] = [:]
   enum Level { case verbose }
@@ -56,6 +61,7 @@ final class PlayerCore {
   struct Info { struct State { let active = true }; let state = State() }
   let info = Info(), mpv = MPVFixture()
   func observe(_ key: Notification.Name, _ handler: @escaping (Notification) -> Void) {}
+  func postNotification(_ name: Notification.Name) {}
   func setSubDelay(_ value: Double, forPrimary: Bool = true) { mpv.values[forPrimary ? "sub-delay" : "secondary-sub-delay"] = value }
   func setSubPos(_ value: Int, forPrimary: Bool = true) { mpv.values[forPrimary ? "sub-pos" : "secondary-sub-pos"] = Double(value) }
   func scopedAudioDelay() -> Double { mpv.getDouble("audio-delay") }

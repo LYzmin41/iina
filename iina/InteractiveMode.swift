@@ -930,8 +930,16 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     if let editorEventMonitor { NSEvent.removeMonitor(editorEventMonitor) }
   }
 
+  var canEnter: Bool {
+    guard let mainWindow, mainWindow.loaded, let window = mainWindow.window else { return false }
+    return !isActive && !mainWindow.isCropTransitionInProgress &&
+      mainWindow.player.info.state.loaded && !mainWindow.player.isInMiniPlayer &&
+      mainWindow.pipStatus == .notInPIP && !mainWindow.isFullscreenTransitionInProgress &&
+      mainWindow.videoView.window === window && mainWindow.videoView.superview === mainWindow.videoViewContainer
+  }
+
   func enter(mode: Mode, selectWholeVideoByDefault: Bool = false) {
-    guard !isActive, !mainWindow.isCropTransitionInProgress, mainWindow.window != nil else { return }
+    guard canEnter else { return }
     mainWindow.prepareVideoTransformWindowReference()
     reloadAspectPresets()
     let player = mainWindow.player
@@ -1477,7 +1485,7 @@ class InteractiveModeController: NSObject, NSTextFieldDelegate, NSPopoverDelegat
     aspectSelector.animatesDigits = true
   }
 
-  @objc private func showAspectMenu(_ sender: NSSegmentedControl) {
+  @objc private func showAspectMenu(_ sender: AccentSegmentedControl) {
     // Publish pending W/H edits before taking the menu's selection snapshot.
     mainWindow.window?.makeFirstResponder(cropBoxView)
     let menu = makeAspectMenu()
@@ -1857,10 +1865,10 @@ private final class CropAspectPresetMenuView: NSView {
   override func draw(_ dirtyRect: NSRect) {
     let highlighted = item.isEnabled && (isHovered || keyboardHighlight)
     if highlighted {
-      NSColor.selectedContentBackgroundColor.setFill()
+      AppAccentColor.color.setFill()
       NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 5, yRadius: 5).fill()
     }
-    let color = item.isEnabled ? (highlighted ? NSColor.selectedMenuItemTextColor : NSColor.labelColor) : NSColor.disabledControlTextColor
+    let color = item.isEnabled ? (highlighted ? AppAccentColor.textColor : NSColor.labelColor) : NSColor.disabledControlTextColor
     let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
     let title = item.title as NSString
     let y = (bounds.height - title.size(withAttributes: attributes).height) / 2

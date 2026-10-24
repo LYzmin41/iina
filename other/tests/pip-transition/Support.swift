@@ -68,16 +68,37 @@ struct Preference {
   static func `enum`(for key: Key) -> WindowBehaviorWhenPip { behavior }
   static func bool(for key: Key) -> Bool { false }
 }
-enum State { case playing, paused, stopped; var active: Bool { self != .stopped } }
-class Info { var state = State.paused }
+enum State {
+  case loading, playing, paused, stopped, shutDown
+  var active: Bool { self == .loading || loaded }
+  var loaded: Bool { self == .playing || self == .paused }
+}
+enum TrackType { case video }
+class Info {
+  var state = State.paused
+  var trackSelectionGeneration = 0
+  var videoTrackIDs: Set<Int> = [1]
+  func activeTrackIDs(_ type: TrackType) -> Set<Int> { videoTrackIDs }
+}
 enum Event { case pipChanged }
 class Events { func emit(_ event: Event, data: Bool) {} }
 class Player {
+  var isInMiniPlayer = false
   let info = Info(); let events = Events(); var disableUI = false
   func pause() {}; func refreshSyncUITimer() {}
 }
 class LiveText { var isActive = false; func clearAnalysis() {}; func requestAnalysis() {} }
-class InteractiveMode { var isActive = false }
+class InteractiveMode {
+  var isActive = false
+  var exitCalls = 0
+  var onExit: (() -> Void)?
+  func exit() {
+    guard isActive else { return }
+    isActive = false
+    exitCalls += 1
+    onExit?()
+  }
+}
 class OSC: NSView { func updatePosition() {} }
 class Titlebar: NSView {
   var revealCalls: [(Bool, Bool)] = []
@@ -88,8 +109,15 @@ class Titlebar: NSView {
 }
 extension Notification.Name { static let iinaPIPStatusChanged = Notification.Name("test.pip") }
 class MainWindowController: NSObject {
+  var loaded = true
+  var isFullscreenTransitionInProgress = false
   func interruptPlayerCropTransition() {}
   var isCropTransitionInProgress = false
+  var onCancelCropTransition: (() -> Void)?
+  func cancelCropExitTransition() {
+    isCropTransitionInProgress = false
+    onCancelCropTransition?()
+  }
   enum PIPStatus { case notInPIP, inPIP, intermediate }
   var pipStatus = PIPStatus.notInPIP
   var pipReturnWindowAlpha: CGFloat?

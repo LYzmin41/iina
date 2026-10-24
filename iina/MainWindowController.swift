@@ -115,6 +115,7 @@ class MainWindowController: PlayerWindowController {
   private var videoTransformWindowSize: NSSize?
   private var videoTransformWindowDisplaySize: NSSize?
   private var videoTransformWindowGeneration: Int?
+  private var windowSizingFileGeneration: Int?
   private var videoAspectTransition: (panscan: Double, mediaGeneration: Int)?
   enum VideoGeometryChange: Hashable { case aspect, rotation }
   private final class GeometryMotion {
@@ -176,7 +177,9 @@ class MainWindowController: PlayerWindowController {
 
   lazy var liveText = LiveTextController(mainWindow: self)
   lazy var interactiveMode = InteractiveModeController(mainWindow: self)
-  var pipStatus = PIPStatus.notInPIP
+  var pipStatus = PIPStatus.notInPIP {
+    didSet { updateOSCToolbarButtonStates() }
+  }
   private var pipReturnWindowAlpha: CGFloat?
   private var pipPreparationFeedback: UUID?
   private var operationFeedbackRequests = Set<UUID>()
@@ -296,6 +299,7 @@ class MainWindowController: PlayerWindowController {
 
   var fsState: FullScreenState = .windowed {
     didSet {
+      updateOSCToolbarButtonStates()
       // Must not access mpv while it is asynchronously processing stop and quit commands.
       guard player.info.state.active else { return }
       switch fsState {
@@ -428,10 +432,7 @@ class MainWindowController: PlayerWindowController {
       }
     case PK.enableLiveText.rawValue:
       if #available(macOS 13, *), let newValue = change[.newKey] as? Bool {
-        let buttons = oscToolbarView.subviews as! [NSButton]
-        if let btn = buttons.first(where: { $0.tag == Preference.ToolBarButton.liveText.rawValue }) {
-          btn.image = newValue ? Preference.ToolBarButton.liveText.alternateImage() : Preference.ToolBarButton.liveText.image()
-        }
+        updateOSCToolbarButtonStates()
         if newValue {
           liveText.requestAnalysis()
         } else {
@@ -863,10 +864,9 @@ class MainWindowController: PlayerWindowController {
     // Observers for toolbar buttons
     let notifications: [Notification.Name] = [.iinaPIPStatusChanged, .iinaFullscreenChanged, .iinaSidebarStatusChanged]
     notifications.forEach {
-      NotificationCenter.default
-        .addObserver(forName: $0, object: nil, queue: .main) { [weak self] n in
-          self?.updateOSCToolbarButtons(n)
-        }
+      addObserver(to: .default, forName: $0) { [weak self] n in
+        self?.updateOSCToolbarButtons(n)
+      }
     }
 
     player.events.emit(.windowLoaded)
@@ -997,12 +997,6 @@ class MainWindowController: PlayerWindowController {
     layoutSides.forEach { videoContainerConstraints[$0]?.isActive = true }
   }
 
-  private func updateVideoContainerConstraints(_ constraints: [NSLayoutConstraint.Attribute: CGFloat]) {
-    for (attr, value) in constraints {
-      videoContainerConstraints[attr]?.constant = value
-    }
-  }
-
   @objc func removeVideoViewBlackBars() {
     guard let window, Preference.unlockWindowAspectRatio, !fsState.isFullscreen else { return }
 
@@ -1023,13 +1017,9 @@ class MainWindowController: PlayerWindowController {
   private func setupOSCToolbarButtons(_ buttons: [Preference.ToolBarButton]) {
     let effectiveButtons = buttons.filter { $0 != .liveText || Preference.isLiveTextEnabled }
     oscToolbarView.views.forEach { oscToolbarView.removeView($0) }
-    let liveTextEnabled = Preference.bool(for: .enableLiveText)
     for buttonType in effectiveButtons {
-      let button = NSButton()
+      let button = OSCToolbarButton()
       OSCToolbarButton.setStyle(of: button, buttonType: buttonType, reducedWidth: false)
-      if buttonType == .liveText && liveTextEnabled {
-        button.image = Preference.ToolBarButton.liveText.alternateImage()
-      }
       button.action = #selector(self.toolBarButtonAction(_:))
       oscToolbarView.addView(button, in: .trailing)
     }
@@ -1040,6 +1030,7 @@ class MainWindowController: PlayerWindowController {
       }.map { (constraint: $0, original: $0.constant) }
     }
     applyFloatingOSCControlScale()
+    updateOSCToolbarButtonStates()
 
 //    let menuButton = NSButton()
 //    menuButton.bezelStyle = .regularSquare
@@ -1052,26 +1043,27 @@ class MainWindowController: PlayerWindowController {
 
   @objc
   private func updateOSCToolbarButtons(_ notification: Notification) {
-    func highlight(_ button: Preference.ToolBarButton, _ isHighlighted: Bool) {
-      let buttons = oscToolbarView.subviews as! [NSButton]
-      let currentButton = buttons.first(where: { $0.tag == button.rawValue })
-      currentButton?.image = isHighlighted ? button.alternateImage() : button.image()
-    }
-
-    let enable = (notification.userInfo?["enable"] as? Bool ?? false)
-    switch notification.name {
-    case .iinaPIPStatusChanged:
-      highlight(.pip, enable)
-    case .iinaFullscreenChanged:
-      highlight(.fullScreen, enable)
-    case .iinaSidebarStatusChanged:
-      // no userInfo is provided in this notification
-      highlight(.settings, sidebars.isShowing(.settings))
-      highlight(.plugins, sidebars.isShowing(.plugins))
-      highlight(.playlist, sidebars.isShowing(.playlist))
+    updateOSCToolbarButtonStates()
+    if notification.name == .iinaSidebarStatusChanged {
       fadeableViews.update()
-    default:
-      break
+    }
+  }
+
+  func updateOSCToolbarButtonStates() {
+    guard let oscToolbarView else { return }
+    for case let button as OSCToolbarButton in oscToolbarView.views {
+      guard let type = Preference.ToolBarButton(rawValue: button.tag) else { continue }
+      let active: Bool
+      switch type {
+      case .settings: active = sidebars.isShowing(.settings)
+      case .playlist: active = sidebars.isShowing(.playlist)
+      case .plugins: active = sidebars.isShowing(.plugins)
+      case .pip: active = pipStatus != .notInPIP
+      case .fullScreen: active = fsState.isFullscreen
+      case .liveText: active = Preference.bool(for: .enableLiveText)
+      default: active = false
+      }
+      button.setActive(active)
     }
   }
 
@@ -1261,12 +1253,13 @@ class MainWindowController: PlayerWindowController {
   @discardableResult
   override func handleKeyBinding(_ keyBinding: KeyMapping) -> Bool {
     let success = super.handleKeyBinding(keyBinding)
-    if success && keyBinding.action.first! == MPVCommand.screenshot.rawValue {
+    guard success, let command = keyBinding.action.first else { return success }
+    if command == MPVCommand.screenshot.rawValue {
       player.sendOSD(.screenshot)
     }
 
     if !keyBinding.isIINACommand {
-      switch keyBinding.action.first! {
+      switch command {
       case MPVCommand.showProgress.rawValue:
         player.sendOSD(.showTime(player.info.progress))
       default: ()
@@ -1776,13 +1769,14 @@ class MainWindowController: PlayerWindowController {
   func windowWillEnterFullScreen(_ notification: Notification) {
     log("Entering full screen mode")
     interruptPlayerCropTransition()
+    if isCropTransitionInProgress { cancelCropExitTransition() }
+    interactiveMode.exit()
     let isLegacyFullScreen = notification.name == .iinaLegacyFullScreen
     fsState.startAnimatingToFullScreen(legacy: isLegacyFullScreen, priorWindowedFrame: window!.frame)
     if notification.name != .iinaLegacyFullScreen { beginFullscreenVideoTransition() }
     // When playback is paused the display link is stopped in order to avoid wasting energy on
     // needless processing. It must be running while transitioning to full screen mode.
     videoView.displayActive()
-    interactiveMode.exit()
 
     liveText.clearAnalysis()
 
@@ -1914,6 +1908,9 @@ class MainWindowController: PlayerWindowController {
   ///     [willExitFullScreenNotification](https://developer.apple.com/documentation/appkit/nswindow/willexitfullscreennotification).
   func windowWillExitFullScreen(_ notification: Notification) {
     log("Exiting full screen mode")
+    interruptPlayerCropTransition()
+    if isCropTransitionInProgress { cancelCropExitTransition() }
+    interactiveMode.exit()
     fsState.startAnimatingToWindow()
     // AppKit reuses the fullscreen titlebar surface while shrinking the window.
     window?.titlebarAppearsTransparent = true
@@ -1921,7 +1918,6 @@ class MainWindowController: PlayerWindowController {
     // When playback is paused the display link is stopped in order to avoid wasting energy on
     // needless processing. It must be running while transitioning from full screen mode.
     videoView.displayActive()
-    interactiveMode.exit()
 
     liveText.clearAnalysis()
 
@@ -2812,6 +2808,22 @@ class MainWindowController: PlayerWindowController {
     videoTransformWindowSize = nil
     videoTransformWindowDisplaySize = nil
     videoTransformWindowGeneration = nil
+    windowSizingFileGeneration = nil
+  }
+
+  /// The explicit restart handoff overrides initial-size preferences once and
+  /// establishes the same geometry reference as the restored visible window.
+  func applyRestartWindowFrame(_ frame: NSRect) {
+    guard let window, frame.width > 0, frame.height > 0 else { return }
+    shouldApplyInitialWindowSize = false
+    windowSizingFileGeneration = player.info.trackSelectionGeneration
+    window.setFrame(frame, display: false, animate: false)
+    let size = player.videoSizeForDisplay
+    establishVideoTransformWindowReference(windowSize: frame.size,
+                                          displaySize: NSSize(width: size.0, height: size.1), initial: true)
+    videoTransformWindowDisplaySize = NSSize(width: size.0, height: size.1)
+    setWindowAspectRatio(frame.size)
+    updateWindowParametersForMPV(withFrame: frame)
   }
 
   private func establishVideoTransformWindowReference(windowSize: NSSize, displaySize: NSSize,
@@ -3547,11 +3559,18 @@ class MainWindowController: PlayerWindowController {
 
     var rect: NSRect
     let isInitialWindowSizing = shouldApplyInitialWindowSize
+    // Consume file-size preferences once; output transforms retain the established scale.
+    let isNewFileSizing = player.info.justStartedFile && !keepWindowSize && !isCropTransitionInProgress
+      && windowSizingFileGeneration != player.info.trackSelectionGeneration
+    let resizeTiming = Preference.enum(for: .resizeWindowTiming) as Preference.ResizeWindowTiming
+    let shouldResizeForNewFile = isNewFileSizing
+      && (resizeTiming == .always || (resizeTiming == .onlyWhenOpen && player.info.justOpenedFile))
+      && (!Preference.unlockWindowAspectRatio || player.info.justOpenedFile)
+    let usesSourceSize = isInitialWindowSizing || shouldResizeForNewFile
 
     let frame = fsState.priorWindowedFrame ?? window.frame
 
-    // Only fresh windows use source-pixel sizing; media/output changes retain the user's established scale.
-    if !isInitialWindowSizing {
+    if !usesSourceSize {
       if Preference.unlockWindowAspectRatio || width <= 0 || height <= 0 {
         rect = frame
         videoTransformWindowReferenceSize = nil
@@ -3619,6 +3638,9 @@ class MainWindowController: PlayerWindowController {
     }
 
     shouldApplyInitialWindowSize = false
+    if isInitialWindowSizing || isNewFileSizing {
+      windowSizingFileGeneration = player.info.trackSelectionGeneration
+    }
 
     let hasExplicitSize = cachedGeometry?.hasExplicitSize == true
     if !isInitialWindowSizing || hasExplicitSize {
@@ -3640,12 +3662,12 @@ class MainWindowController: PlayerWindowController {
       rect = windowFrameConstrainedToScreen(rect, screenFrame: screenRect)
     }
 
-    if isInitialWindowSizing && !Preference.unlockWindowAspectRatio {
+    if usesSourceSize && !Preference.unlockWindowAspectRatio {
       establishVideoTransformWindowReference(windowSize: rect.size, displaySize: originalVideoSize, initial: true)
     }
     setWindowAspectRatio(rect.size)
 
-    if Preference.unlockWindowAspectRatio && !isInitialWindowSizing {
+    if Preference.unlockWindowAspectRatio && !usesSourceSize {
       // do nothing when window aspect ratio is unlocked
       // however, if this is the first time opening the window, still apply the sizing logic
       updateMinimumWindowSize()
@@ -4328,9 +4350,16 @@ extension MainWindowController {
 extension MainWindowController: PIPViewControllerDelegate {
 
   func enterPIP() {
+    guard pipStatus == .notInPIP, loaded, let videoWindow = window,
+          player.info.state.loaded, !player.info.activeTrackIDs(.video).isEmpty,
+          !player.isInMiniPlayer, !isFullscreenTransitionInProgress,
+          videoView.window === videoWindow, videoView.superview === videoViewContainer else { return }
     interruptPlayerCropTransition()
-    guard pipStatus == .notInPIP else { return }
+    if isCropTransitionInProgress { cancelCropExitTransition() }
+    // The editor owns the layer projection and temporary uncropped source.
+    interactiveMode.exit()
     pipStatus = .inPIP
+    let mediaGeneration = player.info.trackSelectionGeneration
     liveText.clearAnalysis()
     let feedback = beginOperationFeedback()
     pipPreparationFeedback = feedback
@@ -4368,9 +4397,18 @@ extension MainWindowController: PIPViewControllerDelegate {
     var prepared = false
     let finishPreparation: () -> Void = { [weak self, weak presentation, weak sourceWindow] in
       let update = {
-        guard let self, let presentation, let sourceWindow,
+        guard let self, let presentation,
               self.pipStatus == .inPIP, self.pipVideo === presentation,
               !prepared else { return }
+        guard let sourceWindow else { self.exitPIP(); return }
+        if supportsPreparation {
+          guard self.player.info.state.loaded,
+                self.player.info.trackSelectionGeneration == mediaGeneration,
+                !self.player.info.activeTrackIDs(.video).isEmpty,
+                !self.player.isInMiniPlayer, !self.isFullscreenTransitionInProgress,
+                self.videoView.window === sourceWindow,
+                self.videoView.superview === self.videoViewContainer else { self.exitPIP(); return }
+        }
         prepared = true
         // This callback precedes the native launch-rectangle read; it does not mean remote video is visible.
         if let sourceRect, let host = presentation.view.window, host !== sourceWindow {

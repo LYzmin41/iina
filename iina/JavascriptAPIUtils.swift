@@ -14,14 +14,6 @@ fileprivate func searchBinary(_ file: String, in url: URL) -> URL? {
   return FileManager.default.fileExists(atPath: url.path) ? url : nil
 }
 
-fileprivate extension Process {
-  var descriptionDict: [String: Any] {
-    return [
-      "status": terminationStatus
-    ]
-  }
-}
-
 fileprivate final class JavascriptProcessOutput {
   private let file: FileHandle
   private let drained: DispatchGroup
@@ -161,19 +153,8 @@ class JavascriptAPIUtils: JavascriptAPI, JavascriptAPIUtilsExportable {
             path = url.path
           }
         } else {
-          // assume it's a system command
-          let useBash = false
-          if useBash {
-            path = "/bin/bash"
-            args.insert(file, at: 0)
-            args = ["-c", args.map {
-              $0.replacingOccurrences(of: " ", with: "\\ ")
-                .replacingOccurrences(of: "'", with: "\\'")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-            }.joined(separator: " ")]
-          } else {
-            args.insert(file, at: 0)
-          }
+          path = "/usr/bin/env"
+          args.insert(file, at: 0)
         }
       } else {
         // it should be an existing file

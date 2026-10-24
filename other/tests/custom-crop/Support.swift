@@ -1,4 +1,9 @@
 import Cocoa
+typealias AccentSegmentedControl = NSSegmentedControl
+enum AppAccentColor {
+  static var color: NSColor { .controlAccentColor }
+  static var textColor: NSColor { .selectedControlTextColor }
+}
 extension Notification.Name { static let iinaTrackSettingsChanged = Self("scopedSettings") }
 
 struct Preference {
@@ -87,12 +92,17 @@ struct CropTrackFixture {
 }
 enum MPVProperty { static let videoOutParams = "video-out-params" }
 class PlayerFixture {
+  var isInMiniPlayer = false
   var isRefreshingPausedCrop = false
   var canAnimateCropSource = true
   private func beginPausedCropRefresh() {}
   private func finishPausedCropRefresh() {}
   weak var mainWindow: MainWindowController!
-  enum State { case paused, playing, stopped; var active: Bool { self != .stopped } }
+  enum State {
+    case paused, playing, loading, stopped
+    var active: Bool { self != .stopped }
+    var loaded: Bool { self == .paused || self == .playing }
+  }
   enum OSD { case crop(String) }
   class Info {
     var state = State.paused
@@ -166,6 +176,10 @@ class LiveTextFixture {
   func requestAnalysis() { requests += 1 }
 }
 class MainWindowController {
+  var loaded = true
+  enum PIPStatus { case notInPIP, inPIP, intermediate }
+  var pipStatus = PIPStatus.notInPIP
+  var isFullscreenTransitionInProgress = false
   var cropExitOverlay: CropTransitionOverlay?
   // PRODUCTION_DEFER_CROP_RESTORATION
   private var forcedCropTransition = false

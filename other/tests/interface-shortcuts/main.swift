@@ -198,6 +198,5 @@ arrowWindow.close()
 print("Focused table routing checks complete: \(checks) total checks.")
 
 controller.interactiveMode.isActive = false
-let seekCount = controller.player.userSeeks
-check(controller.handleKeyBinding(KeyMapping(rawKey:"RIGHT",rawAction:"seek 5",isIINACommand:false)) && controller.player.userSeeks == seekCount + 1,
-      "native seek binding identifies user intent during a paused crop refresh")
+check(controller.handleKeyBinding(KeyMapping(rawKey:"RIGHT",rawAction:"seek 5",isIINACommand:false)) && controller.player.mpv.commands.last == "seek 5",
+      "native seek binding forwards the command to the MPV routing boundary; intent is covered by osd-command-routing")
